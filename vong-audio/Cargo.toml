@@ -15,6 +15,19 @@ path = "src/lib.rs"
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-# Phase 1+ adds: cpal, audio_thread_priority, rtrb, rubato
-# Phase 2 (macOS only): screencapturekit
-# Phase 3 adds: earshot, uuid
+
+# Phase 1 — Mic capture pipeline
+cpal = "0.17"                          # Cross-platform audio I/O (latest as of 2026-05)
+audio_thread_priority = "0.35"         # Promote audio thread RT (RustAudio)
+rtrb = "0.3"                           # Lock-free SPSC ring buffer
+rubato = "0.16"                        # Sinc interpolation resampler (last 0.x — 2.0 has breaking API)
+
+# Phase 2+ (deferred):
+# screencapturekit = "2.1"   # macOS only (#[cfg(target_os = "macos")])
+# Phase 3+ (deferred):
+# earshot = "0.x"
+# uuid = "1"
+
+[dev-dependencies]
+hound = "3.5"                          # WAV file I/O for integration tests
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

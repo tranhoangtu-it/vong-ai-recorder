@@ -101,7 +101,7 @@ Enable verbose: `VONG_LOG=vong=debug cargo run`
 
 ## Phase Workflow
 
-1. Read phase file (`plans/260517-1500-vong-stt-mvp01/phase-XX-*.md`)
+1. Read phase file (`~/.claude/plans/260517-1500-vong-stt-mvp01/phase-XX-*.md` — developer-local)
 2. Update task status: `ck plan check <phase-id> --start`
 3. Implement per Implementation Steps section
 4. Run tests + lint
@@ -175,10 +175,19 @@ Current status: **SKIPPED per Path C YOLO user choice**. Risk accepted.
 
 ## Resources
 
-- Plan v2: `../plans/t-p-trung-v-nghi-n-greedy-pixel.md`
-- MVP 0.1 plan: `../plans/260517-1500-vong-stt-mvp01/plan.md`
-- Phase files: `../plans/260517-1500-vong-stt-mvp01/phase-*.md`
-- Privacy Policy: `../plans/vong-privacy-policy.md`
+In-repo:
+- AI agent guide: `../../CLAUDE.md` — workspace invariants, code-review fixes, paths
+- Security policy: `../SECURITY.md`
+- Storage schema: `../vong-storage/sql/001_initial.sql`
+
+External (developer-local, NOT in this repo — paths use the developer's `~/.claude/plans/`):
+- Plan v2 design doc: `~/.claude/plans/t-p-trung-v-nghi-n-greedy-pixel.md`
+- MVP 0.1 plan: `~/.claude/plans/260517-1500-vong-stt-mvp01/plan.md`
+- Phase files: `~/.claude/plans/260517-1500-vong-stt-mvp01/phase-*.md`
+- Privacy Policy: `~/.claude/plans/vong-privacy-policy.md`
+- Original source spec: `../../Thiết kế ứng dụng ghi âm STT đa nền tảng.md` (parent of workspace)
+
+Upstream docs:
 - Slint docs: https://docs.slint.dev/
 - cpal docs: https://docs.rs/cpal
 - Tokio docs: https://docs.rs/tokio

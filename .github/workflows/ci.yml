@@ -2,18 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, main, develop]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  build-macos:
-    name: Build & Test (macOS)
-    runs-on: macos-latest
+  build-windows:
+    name: Build & Test (Windows — primary)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -33,7 +33,7 @@ jobs:
         working-directory: app
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build release
+      - name: Build release (default CPU-only)
         working-directory: app
         run: cargo build --workspace --release
 
@@ -41,21 +41,22 @@ jobs:
         working-directory: app
         run: cargo test --workspace
 
-      - name: Verify binary size
+      - name: Verify binary size (<15 MB target)
         working-directory: app
+        shell: pwsh
         run: |
-          SIZE=$(stat -f%z target/release/vong 2>/dev/null || stat -c%s target/release/vong)
-          echo "Binary size: $SIZE bytes"
-          if [ "$SIZE" -gt 15728640 ]; then
-            echo "::error::Binary size $SIZE exceeds 15MB target"
+          $size = (Get-Item target\release\vong.exe).Length
+          Write-Output "Binary size: $size bytes ($([math]::Round($size/1MB,1)) MB)"
+          if ($size -gt 15728640) {
+            Write-Output "::error::Binary size $size exceeds 15 MB target"
             exit 1
-          fi
+          }
 
-  build-windows:
-    name: Build (Windows — Phase 8 target)
-    runs-on: windows-latest
-    # Phase 0 only verifies Windows builds for cross-platform sanity.
-    # MVP 0.1 target = macOS. Windows full support = v1.0.
+  build-macos:
+    name: Build (macOS — scaffolding only, paused)
+    runs-on: macos-latest
+    # Windows-first pivot: macOS feature work paused, but cross-compile sanity
+    # check keeps `#[cfg(target_os = "macos")]` gates honest.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

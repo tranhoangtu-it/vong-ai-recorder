@@ -46,6 +46,8 @@ mod device;
 mod error;
 mod resample;
 mod types;
+mod utterance;
+mod vad;
 
 pub use capture::{start_capture, CaptureHandle};
 pub use device::{default_input_device, list_input_devices, negotiate_config, DeviceInfo};
@@ -54,6 +56,8 @@ pub use resample::{run_resampler, ResampleConfig};
 pub use types::{
     AudioConfig, AudioSource, PeakMeter, MAX_CALLBACK_BLOCK, TARGET_CHANNELS, TARGET_SAMPLE_RATE_HZ,
 };
+pub use utterance::{PreRollBuffer, Utterance, UtteranceBuilder};
+pub use vad::{run_vad_fsm, VadConfig, VadFsm, VAD_FRAME_MS, VAD_FRAME_SAMPLES};
 
 /// Vọng audio subsystem version.
 pub fn version() -> &'static str {

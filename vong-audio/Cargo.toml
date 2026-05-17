@@ -24,9 +24,10 @@ rubato = "0.16"                        # Sinc interpolation resampler (last 0.x 
 
 # Phase 2+ (deferred):
 # screencapturekit = "2.1"   # macOS only (#[cfg(target_os = "macos")])
-# Phase 3+ (deferred):
-# earshot = "0.x"
-# uuid = "1"
+
+# Phase 3 — VAD + utterance state machine
+earshot = "1.1"                        # Pure Rust VAD (pykeio) — RTF 0.0007, no_std
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 hound = "3.5"                          # WAV file I/O for integration tests

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build-macos:
+    name: Build & Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        working-directory: app
+        run: cargo fmt --all -- --check
+
+      - name: Clippy lint
+        working-directory: app
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build release
+        working-directory: app
+        run: cargo build --workspace --release
+
+      - name: Run tests
+        working-directory: app
+        run: cargo test --workspace
+
+      - name: Verify binary size
+        working-directory: app
+        run: |
+          SIZE=$(stat -f%z target/release/vong 2>/dev/null || stat -c%s target/release/vong)
+          echo "Binary size: $SIZE bytes"
+          if [ "$SIZE" -gt 15728640 ]; then
+            echo "::error::Binary size $SIZE exceeds 15MB target"
+            exit 1
+          fi
+
+  build-windows:
+    name: Build (Windows — Phase 8 target)
+    runs-on: windows-latest
+    # Phase 0 only verifies Windows builds for cross-platform sanity.
+    # MVP 0.1 target = macOS. Windows full support = v1.0.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        working-directory: app
+        run: cargo build --workspace
+
+  security:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit + cargo-deny
+        run: |
+          cargo install --locked cargo-audit
+          cargo install --locked cargo-deny
+
+      - name: Cargo audit (CVE check)
+        working-directory: app
+        run: cargo audit --deny warnings
+
+      - name: Cargo deny (license + policy)
+        working-directory: app
+        run: cargo deny check

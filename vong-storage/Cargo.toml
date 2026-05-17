@@ -1,0 +1,19 @@
+[package]
+name = "vong-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vọng local SQLite storage + FTS5 Vietnamese tone-insensitive search"
+
+[lib]
+name = "vong_storage"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+# Phase 6 adds: rusqlite, rusqlite_migration, unicode-normalization, directories

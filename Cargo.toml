@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "vong-app",
+    "vong-audio",
+    "vong-stt",
+    "vong-storage",
+    "vong-ui",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+rust-version = "1.78"
+license = "AGPL-3.0-only"
+authors = ["Vọng <dev@vong.app>"]
+homepage = "https://vong.app"
+repository = "https://github.com/vong-app/vong-stt-mvp01"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.38", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UI
+slint = "1.7"
+
+# Internal crates (path deps for workspace)
+vong-audio = { path = "vong-audio" }
+vong-stt = { path = "vong-stt" }
+vong-storage = { path = "vong-storage" }
+vong-ui = { path = "vong-ui" }
+
+# === Build profiles per plan v2 Section 4.5 ===
+[profile.release]
+opt-level = "z"        # Size > speed (binary target <15MB)
+lto = "fat"            # Full Link-Time Optimization
+codegen-units = 1      # Maximum optimization (slow build)
+strip = "symbols"      # Remove debug symbols
+panic = "abort"        # No stack unwinding (saves binary size + faster panic)
+debug = false
+
+# Performance-optimized profile (when speed matters more than size)
+[profile.release-perf]
+inherits = "release"
+opt-level = 3
+lto = "thin"
+
+# Faster dev iteration
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true

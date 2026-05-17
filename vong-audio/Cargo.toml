@@ -1,0 +1,20 @@
+[package]
+name = "vong-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vọng audio capture + mixing + VAD pipeline (Phase 1-3)"
+
+[lib]
+name = "vong_audio"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+# Phase 1+ adds: cpal, audio_thread_priority, rtrb, rubato
+# Phase 2 (macOS only): screencapturekit
+# Phase 3 adds: earshot, uuid

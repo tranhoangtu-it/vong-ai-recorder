@@ -1,0 +1,20 @@
+[package]
+name = "vong-stt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vọng Speech-to-Text providers (Soniox WebSocket, future OpenAI/Google)"
+
+[lib]
+name = "vong_stt"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Phase 4 adds: tokio-tungstenite, rustls, tokio-rustls, keyring, secrecy, async-trait

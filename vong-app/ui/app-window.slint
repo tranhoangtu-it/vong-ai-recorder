@@ -1,0 +1,39 @@
+// Vọng STT — Phase 0 Hello Window
+// Phase 1+ will replace with real UI (tray, floating pill, dashboard).
+
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Vọng";
+    width: 480px;
+    height: 320px;
+    background: #0a0a0a;
+
+    VerticalBox {
+        alignment: center;
+        spacing: 16px;
+        padding: 32px;
+
+        Text {
+            text: "🔊 Vọng";
+            font-size: 48px;
+            font-weight: 800;
+            color: #8b5cf6;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "Cuộc họp đa ngôn ngữ.\nKhông một câu bị bỏ sót.";
+            font-size: 16px;
+            color: #a3a3a3;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "Phase 0 — Scaffolding complete ✓";
+            font-size: 12px;
+            color: #4ade80;
+            horizontal-alignment: center;
+        }
+    }
+}

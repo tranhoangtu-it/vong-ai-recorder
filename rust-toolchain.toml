@@ -1,0 +1,7 @@
+[toolchain]
+# Minimum 1.78 enforced via Cargo.toml rust-version. Stable channel = latest.
+# Mac builders should `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
+# manually before Phase 8 universal binary build.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "default"

@@ -1,0 +1,45 @@
+                    GNU AFFERO GENERAL PUBLIC LICENSE
+                       Version 3, 19 November 2007
+
+ Copyright (C) 2026 Vọng STT contributors
+
+ Everyone is permitted to copy and distribute verbatim copies of this
+ license document, but changing it is not allowed.
+
+ ===============================================================================
+
+ ⚠️ PLACEHOLDER NOTICE — Replace before public release
+
+ This file should contain the full AGPL-3.0-only license text. Download from:
+ https://www.gnu.org/licenses/agpl-3.0.txt
+
+ Until then, this codebase is governed by the terms of the GNU Affero General
+ Public License, version 3, as published by the Free Software Foundation.
+
+ Pro tier (future) — see EULA-PRO.md (TBD post v1.0).
+
+ ===============================================================================
+
+ PRE-LAUNCH ACTION (Phase 8 / before public release):
+
+ 1. Download full AGPL-3.0 text: curl -O https://www.gnu.org/licenses/agpl-3.0.txt
+ 2. Replace this file content with downloaded text.
+ 3. Add SPDX-License-Identifier header to all source files:
+    // SPDX-License-Identifier: AGPL-3.0-only
+ 4. Update Cargo.toml: license = "AGPL-3.0-only" (already done).
+ 5. Verify cargo-deny exception for Slint GPL transitively (already in deny.toml).
+
+ ===============================================================================
+
+ SUMMARY (informational, not legally binding — full AGPL text is the binding doc):
+
+ The AGPL-3.0 license requires that:
+ - Modified versions used to provide a service to remote users must release the
+   source code of those modifications to those users.
+ - Derivative works must use the same license.
+ - Patent grant from contributors is included.
+
+ This protects Vọng's open source core from being used as a closed-source SaaS
+ without contributing back. Pro tier (proprietary) sold separately via EULA.
+
+ ===============================================================================

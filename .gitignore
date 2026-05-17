@@ -1,0 +1,63 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Cargo lock — uncomment if library, keep for binary
+# Cargo.lock
+
+# Slint generated
+*.slint.rs
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Local environment
+.env
+.env.local
+.envrc
+
+# Test artifacts
+tests/output/
+tests/fixtures/*.wav  # Don't commit large audio fixtures
+!tests/fixtures/README.md
+
+# Distribution build artifacts
+*.dmg
+*.app
+*.iconset/
+build/
+dist/
+
+# API keys (paranoid double-check)
+*.key
+*.pem
+*.p12
+secrets/
+
+# Profile output
+flamegraph.svg
+perf.data*
+*.profraw
+*.profdata
+
+# Docs build (if mdBook added later)
+book/

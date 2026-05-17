@@ -1,0 +1,19 @@
+[package]
+name = "vong-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vọng UI — Slint tray + floating pill + dashboard + global hotkey"
+
+[lib]
+name = "vong_ui"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+slint = { workspace = true }
+# Phase 5 adds (target_os = "macos"): tray-icon, global-hotkey, window-vibrancy, raw-window-handle
+# Phase 7 adds: toml, directories, objc2, core-foundation

@@ -1,0 +1,29 @@
+[package]
+name = "vong-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Vọng STT — desktop audio recording + multilingual transcription"
+
+[[bin]]
+name = "vong"
+path = "src/main.rs"
+
+[dependencies]
+slint = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Internal crates (commented out for Phase 0 — uncomment Phase 1+)
+# vong-audio = { workspace = true }
+# vong-stt = { workspace = true }
+# vong-storage = { workspace = true }
+# vong-ui = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.7"

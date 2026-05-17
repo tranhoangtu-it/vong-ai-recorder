@@ -1,7 +1,7 @@
 //! Core audio types — config, peak meter, audio sources.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Target output configuration for all STT providers (Whisper, Soniox, etc.).
 /// PCM signed 16-bit, mono, 16 kHz per plan v2 Section 4.1.
@@ -52,6 +52,37 @@ impl AudioConfig {
     /// Estimate per-callback duration in milliseconds.
     pub fn callback_duration_ms(&self) -> f32 {
         (self.buffer_size as f32 / self.sample_rate as f32) * 1000.0
+    }
+}
+
+/// Atomic counter of samples dropped due to ring buffer overflow.
+///
+/// Per code-reviewer C2 finding: prior code used `push_entire_slice` (all-or-nothing).
+/// Now callback uses partial push and increments this counter when consumer falls
+/// behind. UI/diagnostic layer polls `take_count()` to log + report.
+///
+/// Lock-free, RT-safe. Producer (audio callback) only increments;
+/// consumer drains via `take_count()`.
+#[derive(Debug, Clone, Default)]
+pub struct OverflowCounter(Arc<AtomicU64>);
+
+impl OverflowCounter {
+    /// Create a new counter at zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add to dropped-sample count (RT-safe).
+    #[inline]
+    pub fn add(&self, n: u64) {
+        if n > 0 {
+            self.0.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
+    /// Read + reset count atomically. Returns total dropped since last read.
+    pub fn take_count(&self) -> u64 {
+        self.0.swap(0, Ordering::Relaxed)
     }
 }
 

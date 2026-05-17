@@ -19,7 +19,7 @@
 
 use crate::device::{negotiate_config, to_stream_config};
 use crate::error::AudioError;
-use crate::types::{AudioConfig, PeakMeter, MAX_CALLBACK_BLOCK};
+use crate::types::{AudioConfig, OverflowCounter, PeakMeter, MAX_CALLBACK_BLOCK};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +63,7 @@ pub fn start_capture(
     device: &Device,
     mut tx: rtrb::Producer<i16>,
     peak: PeakMeter,
+    overflow: OverflowCounter,
 ) -> Result<CaptureHandle, AudioError> {
     let supported = negotiate_config(device)?;
     let sample_format = supported.sample_format();
@@ -95,7 +96,7 @@ pub fn start_capture(
             &stream_config,
             move |data: &[f32], _info: &cpal::InputCallbackInfo| {
                 promote_rt_once(&RT_PROMOTED, sample_rate);
-                forward_f32(data, channels, &mut tx, &peak);
+                forward_f32(data, channels, &mut tx, &peak, &overflow);
             },
             err_fn,
             None,
@@ -104,7 +105,7 @@ pub fn start_capture(
             &stream_config,
             move |data: &[i16], _info: &cpal::InputCallbackInfo| {
                 promote_rt_once(&RT_PROMOTED, sample_rate);
-                forward_i16(data, channels, &mut tx, &peak);
+                forward_i16(data, channels, &mut tx, &peak, &overflow);
             },
             err_fn,
             None,
@@ -113,7 +114,7 @@ pub fn start_capture(
             &stream_config,
             move |data: &[u16], _info: &cpal::InputCallbackInfo| {
                 promote_rt_once(&RT_PROMOTED, sample_rate);
-                forward_u16(data, channels, &mut tx, &peak);
+                forward_u16(data, channels, &mut tx, &peak, &overflow);
             },
             err_fn,
             None,
@@ -166,12 +167,38 @@ fn promote_rt_once(flag: &AtomicBool, sample_rate: u32) {
     }
 }
 
+/// Push as many samples as fit in the ring buffer; increment overflow counter
+/// for samples dropped.
+///
+/// Per code-reviewer C2 fix: `rtrb::push_entire_slice` is all-or-nothing.
+/// Under transient consumer slow-down, dropping the WHOLE 1024-sample block
+/// (~21ms) is worse than dropping just the trailing samples that don't fit.
+/// We compute available slots first and push only that many.
+#[inline]
+fn push_partial(tx: &mut rtrb::Producer<i16>, samples: &[i16], overflow: &OverflowCounter) {
+    let available = tx.slots();
+    let to_push = available.min(samples.len());
+    if to_push > 0 {
+        let _ = tx.push_entire_slice(&samples[..to_push]);
+    }
+    let dropped = samples.len().saturating_sub(to_push);
+    if dropped > 0 {
+        overflow.add(dropped as u64);
+    }
+}
+
 /// Forward f32 samples → i16, downmix on the fly if channels > 1 → still
 /// preserve as interleaved (downmix to mono happens later in resampler).
 ///
 /// Stack-only: `tmp` buffer is sized at `MAX_CALLBACK_BLOCK` and bounded.
 #[inline]
-fn forward_f32(data: &[f32], channels: u16, tx: &mut rtrb::Producer<i16>, peak: &PeakMeter) {
+fn forward_f32(
+    data: &[f32],
+    channels: u16,
+    tx: &mut rtrb::Producer<i16>,
+    peak: &PeakMeter,
+    overflow: &OverflowCounter,
+) {
     let mut tmp = [0i16; MAX_CALLBACK_BLOCK];
     let n = data.len().min(MAX_CALLBACK_BLOCK);
     let mut local_peak = 0f32;
@@ -187,14 +214,20 @@ fn forward_f32(data: &[f32], channels: u16, tx: &mut rtrb::Producer<i16>, peak: 
         tmp[i] = q;
     }
 
-    let _ = tx.push_entire_slice(&tmp[..n]); // drop on overflow (no panic)
+    push_partial(tx, &tmp[..n], overflow);
     peak.update(local_peak);
 
     let _ = channels; // currently informational — downmix handled in resampler
 }
 
 #[inline]
-fn forward_i16(data: &[i16], channels: u16, tx: &mut rtrb::Producer<i16>, peak: &PeakMeter) {
+fn forward_i16(
+    data: &[i16],
+    channels: u16,
+    tx: &mut rtrb::Producer<i16>,
+    peak: &PeakMeter,
+    overflow: &OverflowCounter,
+) {
     let n = data.len().min(MAX_CALLBACK_BLOCK);
     let mut local_peak = 0i32;
 
@@ -205,13 +238,19 @@ fn forward_i16(data: &[i16], channels: u16, tx: &mut rtrb::Producer<i16>, peak: 
         }
     }
 
-    let _ = tx.push_entire_slice(&data[..n]);
+    push_partial(tx, &data[..n], overflow);
     peak.update(local_peak as f32 / i16::MAX as f32);
     let _ = channels;
 }
 
 #[inline]
-fn forward_u16(data: &[u16], channels: u16, tx: &mut rtrb::Producer<i16>, peak: &PeakMeter) {
+fn forward_u16(
+    data: &[u16],
+    channels: u16,
+    tx: &mut rtrb::Producer<i16>,
+    peak: &PeakMeter,
+    overflow: &OverflowCounter,
+) {
     let mut tmp = [0i16; MAX_CALLBACK_BLOCK];
     let n = data.len().min(MAX_CALLBACK_BLOCK);
     let mut local_peak = 0i32;
@@ -226,7 +265,7 @@ fn forward_u16(data: &[u16], channels: u16, tx: &mut rtrb::Producer<i16>, peak: 
         }
     }
 
-    let _ = tx.push_entire_slice(&tmp[..n]);
+    push_partial(tx, &tmp[..n], overflow);
     peak.update(local_peak as f32 / i16::MAX as f32);
     let _ = channels;
 }

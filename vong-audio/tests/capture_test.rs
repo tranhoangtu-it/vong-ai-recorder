@@ -8,8 +8,8 @@ use rtrb::RingBuffer;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use vong_audio::{
-    default_input_device, run_resampler, start_capture, AudioError, PeakMeter, ResampleConfig,
-    TARGET_SAMPLE_RATE_HZ,
+    default_input_device, run_resampler, start_capture, AudioError, OverflowCounter, PeakMeter,
+    ResampleConfig, TARGET_SAMPLE_RATE_HZ,
 };
 
 const TEST_DURATION_SEC: u64 = 1;
@@ -30,8 +30,9 @@ async fn captures_one_second_resamples_to_16khz_mono() {
     // Ring buffer ~5s @ 48kHz stereo
     let (tx, rx) = RingBuffer::<i16>::new(480_000);
     let peak = PeakMeter::new();
+    let overflow = OverflowCounter::new();
 
-    let handle = match start_capture(&device, tx, peak.clone()) {
+    let handle = match start_capture(&device, tx, peak.clone(), overflow.clone()) {
         Ok(h) => h,
         Err(e) => {
             // Some Windows CI / sandboxed environments fail at stream build
@@ -127,4 +128,9 @@ async fn captures_one_second_resamples_to_16khz_mono() {
 
     let peak_val = peak.read_and_reset();
     println!("peak amplitude observed: {peak_val:.4}");
+
+    let dropped = overflow.take_count();
+    if dropped > 0 {
+        eprintln!("WARN: dropped {dropped} samples due to ring buffer overflow");
+    }
 }

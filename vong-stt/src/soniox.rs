@@ -16,6 +16,19 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use vong_audio::Utterance;
+use zeroize::Zeroizing;
+
+/// Helper: serialize `ConfigMessage` to a `Zeroizing<String>` so that the
+/// JSON containing the API key is zeroized when dropped after send.
+///
+/// Per code-reviewer C1 finding: prior code used `serde_json::to_string()`
+/// which returns a plain `String` — the api_key bytes lingered in memory
+/// until reused. Now we wrap in `Zeroizing<String>` to clear immediately
+/// on drop (post-send).
+fn serialize_config_zeroizing(config: &ConfigMessage) -> Result<Zeroizing<String>, SttError> {
+    let json = serde_json::to_string(config)?;
+    Ok(Zeroizing::new(json))
+}
 
 const DEFAULT_WS_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 const PING_INTERVAL_SECS: u64 = 30;
@@ -68,13 +81,18 @@ impl SonioxProvider {
             enable_translation_to: None,
         };
         let config = self.build_config(&opts);
-        let config_json = serde_json::to_string(&config)?;
+        // Per C1 fix: wrap JSON in Zeroizing so api_key bytes clear after send
+        let config_json = serialize_config_zeroizing(&config)?;
 
         let (mut ws, _resp) = tokio_tungstenite::connect_async(&self.ws_url)
             .await
             .map_err(|e| SttError::Network(format!("connect: {e}")))?;
 
-        ws.send(Message::Text(config_json.into()))
+        // Convert to owned String for tungstenite; Zeroizing drops + clears
+        // the original local copy after this line.
+        let json_str: String = (*config_json).clone();
+        drop(config_json);
+        ws.send(Message::Text(json_str.into()))
             .await
             .map_err(|e| SttError::Network(format!("send config: {e}")))?;
 
@@ -188,8 +206,11 @@ impl StreamingTranscriber for SonioxProvider {
 
             // Connected — send config
             let config = self.build_config(&opts);
-            let config_json = serde_json::to_string(&config)?;
-            if let Err(e) = ws.send(Message::Text(config_json.into())).await {
+            // Per C1 fix: wrap JSON in Zeroizing so api_key bytes clear after send
+            let config_json = serialize_config_zeroizing(&config)?;
+            let json_str: String = (*config_json).clone();
+            drop(config_json);
+            if let Err(e) = ws.send(Message::Text(json_str.into())).await {
                 tracing::warn!(error = %e, "Soniox send config failed");
                 continue;
             }

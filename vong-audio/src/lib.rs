@@ -7,7 +7,8 @@
 //! # Quick start (Phase 1 pipeline)
 //!
 //! ```no_run
-//! use vong_audio::{default_input_device, start_capture, run_resampler, PeakMeter, ResampleConfig};
+//! use vong_audio::{default_input_device, start_capture, run_resampler,
+//!     OverflowCounter, PeakMeter, ResampleConfig};
 //! use rtrb::RingBuffer;
 //! use tokio::sync::mpsc;
 //!
@@ -17,7 +18,8 @@
 //!
 //! let device = default_input_device()?;
 //! let peak = PeakMeter::new();
-//! let handle = start_capture(&device, tx, peak.clone())?;
+//! let overflow = OverflowCounter::new();
+//! let handle = start_capture(&device, tx, peak.clone(), overflow.clone())?;
 //!
 //! // Resampler emits 16k mono PCM16 chunks via mpsc.
 //! let (out_tx, mut out_rx) = mpsc::channel(64);
@@ -54,7 +56,8 @@ pub use device::{default_input_device, list_input_devices, negotiate_config, Dev
 pub use error::AudioError;
 pub use resample::{run_resampler, ResampleConfig};
 pub use types::{
-    AudioConfig, AudioSource, PeakMeter, MAX_CALLBACK_BLOCK, TARGET_CHANNELS, TARGET_SAMPLE_RATE_HZ,
+    AudioConfig, AudioSource, OverflowCounter, PeakMeter, MAX_CALLBACK_BLOCK, TARGET_CHANNELS,
+    TARGET_SAMPLE_RATE_HZ,
 };
 pub use utterance::{PreRollBuffer, Utterance, UtteranceBuilder};
 pub use vad::{run_vad_fsm, VadConfig, VadFsm, VAD_FRAME_MS, VAD_FRAME_SAMPLES};

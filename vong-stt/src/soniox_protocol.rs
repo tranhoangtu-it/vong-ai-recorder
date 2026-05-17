@@ -9,10 +9,18 @@ use serde::{Deserialize, Serialize};
 /// Initial config message sent after WebSocket connect.
 ///
 /// Includes API key (over TLS — never logged).
-#[derive(Debug, Serialize)]
+///
+/// ⚠️ Plan v2 Section 15.3 — `#[derive(Debug)]` is DELIBERATELY OMITTED.
+/// Debug-printing this struct would leak the API key via `{:?}` formatter.
+/// If you need to inspect for debugging, log specific safe fields only
+/// (model, sample_rate, etc.) — NEVER print this struct as a whole.
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) struct ConfigMessage {
     /// Soniox API key (sent over TLS, sanitized from logs).
+    /// This field is plaintext at the serialization boundary by necessity
+    /// (Soniox protocol requires JSON-embedded api_key). Caller (soniox.rs)
+    /// must wrap serialized output in `Zeroizing<String>` to clear after send.
     pub api_key: String,
 
     /// Model identifier (e.g., "stt-rt-preview", "stt-rt-v4", whichever current).

@@ -30,7 +30,7 @@
 use crate::error::AudioError;
 use crate::types::TARGET_SAMPLE_RATE_HZ;
 use crate::utterance::{PreRollBuffer, Utterance, UtteranceBuilder};
-use earshot::{Detector, DefaultPredictor};
+use earshot::{DefaultPredictor, Detector};
 use tokio::sync::mpsc;
 
 /// VAD frame size (samples). Earshot 1.1 fixed at 256 samples @ 16 kHz = 16 ms.
@@ -58,10 +58,10 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.5,         // earshot recommends >0.5 as voice
-            hangover_ms: 400,       // plan v2 default; spec gốc says 300-500ms
-            pre_roll_ms: 200,       // capture "hello" first transient
-            min_duration_ms: 200,   // discard <200ms blips
+            threshold: 0.5,          // earshot recommends >0.5 as voice
+            hangover_ms: 400,        // plan v2 default; spec gốc says 300-500ms
+            pre_roll_ms: 200,        // capture "hello" first transient
+            min_duration_ms: 200,    // discard <200ms blips
             max_duration_ms: 30_000, // 30s force-pack ceiling
         }
     }
@@ -141,14 +141,16 @@ impl VadFsm {
             }
             (VadState::Idle, true) => {
                 // Voice onset → transition to RECORDING, prepend pre-roll
-                let mut builder = UtteranceBuilder::new(self.seq);
+                let onset_seq = self.seq;
+                let mut builder = UtteranceBuilder::new(onset_seq);
                 self.seq = self.seq.wrapping_add(1);
                 let pre = self.pre_roll.drain_to_vec();
                 builder.append_slice(&pre);
                 builder.append_slice(frame);
                 tracing::info!(
-                    seq = builder.duration_ms(),
+                    seq = onset_seq,
                     pre_roll_samples = pre.len(),
+                    initial_ms = builder.duration_ms(),
                     "VAD: utterance start"
                 );
                 self.current = Some(builder);
@@ -207,7 +209,10 @@ impl VadFsm {
                     sample_count = utt.sample_count(),
                     "VAD: utterance pack"
                 );
-                out_tx.send(utt).await.map_err(|_| AudioError::ConsumerDropped)?;
+                out_tx
+                    .send(utt)
+                    .await
+                    .map_err(|_| AudioError::ConsumerDropped)?;
             }
         }
         self.state = VadState::Idle;

@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! use vong_audio::{default_input_device, start_capture, run_resampler,
-//!     OverflowCounter, PeakMeter, ResampleConfig};
+//!     DeviceKind, OverflowCounter, PeakMeter, ResampleConfig};
 //! use rtrb::RingBuffer;
 //! use tokio::sync::mpsc;
 //!
@@ -19,7 +19,7 @@
 //! let device = default_input_device()?;
 //! let peak = PeakMeter::new();
 //! let overflow = OverflowCounter::new();
-//! let handle = start_capture(&device, tx, peak.clone(), overflow.clone())?;
+//! let handle = start_capture(&device, DeviceKind::Input, tx, peak.clone(), overflow.clone())?;
 //!
 //! // Resampler emits 16k mono PCM16 chunks via mpsc.
 //! let (out_tx, mut out_rx) = mpsc::channel(64);
@@ -52,7 +52,10 @@ mod utterance;
 mod vad;
 
 pub use capture::{start_capture, CaptureHandle};
-pub use device::{default_input_device, list_input_devices, negotiate_config, DeviceInfo};
+pub use device::{
+    default_input_device, find_device, list_all_devices, list_input_devices, negotiate_config,
+    DeviceInfo, DeviceKind,
+};
 pub use error::AudioError;
 pub use resample::{run_resampler, ResampleConfig};
 pub use types::{

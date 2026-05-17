@@ -6,7 +6,11 @@ use rusqlite::Connection;
 /// Export session as plain text. Segments joined with newlines.
 pub fn export_text(conn: &Connection, session_id: i64) -> Result<String, StorageError> {
     let segments = fetch_segments_for_session(conn, session_id)?;
-    let body = segments.iter().map(|s| s.text.clone()).collect::<Vec<_>>().join("\n");
+    let body = segments
+        .iter()
+        .map(|s| s.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(body)
 }
 
@@ -18,7 +22,10 @@ pub fn export_markdown(conn: &Connection, session_id: i64) -> Result<String, Sto
     let mut out = String::new();
     out.push_str("# Transcript\n\n");
     out.push_str(&format!("**Session ID**: {}\n\n", session.id));
-    out.push_str(&format!("**Started at (epoch ms)**: {}\n\n", session.started_at_ms));
+    out.push_str(&format!(
+        "**Started at (epoch ms)**: {}\n\n",
+        session.started_at_ms
+    ));
     if let Some(dur) = session.duration_ms {
         out.push_str(&format!("**Duration**: {}s\n\n", dur / 1000));
     }
@@ -29,7 +36,11 @@ pub fn export_markdown(conn: &Connection, session_id: i64) -> Result<String, Sto
     }
     out.push_str("---\n\n");
     for seg in &segments {
-        out.push_str(&format!("**[{}]** {}\n\n", format_ms_as_mmss(seg.start_ms), seg.text));
+        out.push_str(&format!(
+            "**[{}]** {}\n\n",
+            format_ms_as_mmss(seg.start_ms),
+            seg.text
+        ));
     }
     Ok(out)
 }
@@ -76,25 +87,33 @@ mod tests {
 
     fn setup() -> (Connection, i64) {
         let conn = open_in_memory().unwrap();
-        let sid = insert_session(&conn, &NewSession {
-            started_at_ms: 1_700_000_000_000,
-            audio_source: "mic".into(),
-            provider: "soniox".into(),
-            detected_language: Some("vi".into()),
-            meta_json: None,
-        }).unwrap();
+        let sid = insert_session(
+            &conn,
+            &NewSession {
+                started_at_ms: 1_700_000_000_000,
+                audio_source: "mic".into(),
+                provider: "soniox".into(),
+                detected_language: Some("vi".into()),
+                meta_json: None,
+            },
+        )
+        .unwrap();
         for (i, text) in ["Hello world", "How are you", "Goodbye"].iter().enumerate() {
-            insert_segment(&conn, &NewSegment {
-                session_id: sid,
-                seq: i as i64,
-                start_ms: (i as i64) * 2000,
-                end_ms: (i as i64 + 1) * 2000,
-                speaker_label: None,
-                text: text.to_string(),
-                language: Some("en".into()),
-                confidence: None,
-                is_final: true,
-            }).unwrap();
+            insert_segment(
+                &conn,
+                &NewSegment {
+                    session_id: sid,
+                    seq: i as i64,
+                    start_ms: (i as i64) * 2000,
+                    end_ms: (i as i64 + 1) * 2000,
+                    speaker_label: None,
+                    text: text.to_string(),
+                    language: Some("en".into()),
+                    confidence: None,
+                    is_final: true,
+                },
+            )
+            .unwrap();
         }
         finalize_session(&conn, sid).unwrap();
         (conn, sid)

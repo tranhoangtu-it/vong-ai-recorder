@@ -1,7 +1,7 @@
 //! Core audio types — config, peak meter, audio sources.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Target output configuration for all STT providers (Whisper, Soniox, etc.).
 /// PCM signed 16-bit, mono, 16 kHz per plan v2 Section 4.1.

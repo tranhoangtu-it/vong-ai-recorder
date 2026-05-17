@@ -2,9 +2,14 @@
 # Plan v2 Section 15.2 — Run via: cargo deny check
 
 [graph]
+# Windows-first pivot (temporary — macOS targets re-add when Phase 2 macOS loopback
+# work resumes). Windows MSVC is primary build target.
 targets = [
-    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-pc-windows-msvc" },
+    # Kept compiling under deny check so cross-platform deps surface CVEs/license issues:
     { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
 ]
 
 [advisories]

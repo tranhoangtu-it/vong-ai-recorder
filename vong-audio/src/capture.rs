@@ -17,7 +17,7 @@
 //!   [Phase 1 consumer: resampler.rs reads here]
 //! ```
 
-use crate::device::{negotiate_config, to_stream_config};
+use crate::device::{negotiate_config, to_stream_config, DeviceKind};
 use crate::error::AudioError;
 use crate::types::{AudioConfig, OverflowCounter, PeakMeter, MAX_CALLBACK_BLOCK};
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -61,11 +61,12 @@ impl CaptureHandle {
 #[allow(deprecated)] // cpal 0.17: name() deprecated, but our usage is for display only
 pub fn start_capture(
     device: &Device,
+    kind: DeviceKind,
     mut tx: rtrb::Producer<i16>,
     peak: PeakMeter,
     overflow: OverflowCounter,
 ) -> Result<CaptureHandle, AudioError> {
-    let supported = negotiate_config(device)?;
+    let supported = negotiate_config(device, kind)?;
     let sample_format = supported.sample_format();
     let channels = supported.channels();
     let sample_rate = supported.sample_rate();
@@ -115,6 +116,15 @@ pub fn start_capture(
             move |data: &[u16], _info: &cpal::InputCallbackInfo| {
                 promote_rt_once(&RT_PROMOTED, sample_rate);
                 forward_u16(data, channels, &mut tx, &peak, &overflow);
+            },
+            err_fn,
+            None,
+        )?,
+        SampleFormat::U8 => device.build_input_stream(
+            &stream_config,
+            move |data: &[u8], _info: &cpal::InputCallbackInfo| {
+                promote_rt_once(&RT_PROMOTED, sample_rate);
+                forward_u8(data, channels, &mut tx, &peak, &overflow);
             },
             err_fn,
             None,
@@ -258,6 +268,34 @@ fn forward_u16(
     for i in 0..n {
         // u16 [0, 65535] center 32768 → i16 [-32768, 32767]
         let s = (data[i] as i32 - 32768) as i16;
+        tmp[i] = s;
+        let abs = (s as i32).abs();
+        if abs > local_peak {
+            local_peak = abs;
+        }
+    }
+
+    push_partial(tx, &tmp[..n], overflow);
+    peak.update(local_peak as f32 / i16::MAX as f32);
+    let _ = channels;
+}
+
+#[inline]
+fn forward_u8(
+    data: &[u8],
+    channels: u16,
+    tx: &mut rtrb::Producer<i16>,
+    peak: &PeakMeter,
+    overflow: &OverflowCounter,
+) {
+    let mut tmp = [0i16; MAX_CALLBACK_BLOCK];
+    let n = data.len().min(MAX_CALLBACK_BLOCK);
+    let mut local_peak = 0i32;
+
+    for i in 0..n {
+        // u8 [0, 255] center 128 → i16 [-32768, 32512]. Left-shift 8 scales 8-bit
+        // dynamic range up to 16-bit container; LSB stays zero (no fake precision).
+        let s = ((data[i] as i32 - 128) << 8) as i16;
         tmp[i] = s;
         let abs = (s as i32).abs();
         if abs > local_peak {

@@ -157,10 +157,13 @@ impl SonioxProvider {
             enable_language_identification: opts.enable_lid,
             enable_speaker_diarization: opts.enable_diarization,
             language_hints: opts.language_hint.as_ref().map(|h| vec![h.clone()]),
-            translation: opts.enable_translation_to.as_ref().map(|t| TranslationConfig {
-                mode: "one_way".into(),
-                target_language: t.clone(),
-            }),
+            translation: opts
+                .enable_translation_to
+                .as_ref()
+                .map(|t| TranslationConfig {
+                    mode: "one_way".into(),
+                    target_language: t.clone(),
+                }),
         }
     }
 }
@@ -199,7 +202,11 @@ impl StreamingTranscriber for SonioxProvider {
                             tokio::time::sleep(d).await;
                             continue;
                         }
-                        None => return Err(SttError::ReconnectExhausted { attempts: backoff.attempts() }),
+                        None => {
+                            return Err(SttError::ReconnectExhausted {
+                                attempts: backoff.attempts(),
+                            })
+                        }
                     }
                 }
             };
@@ -292,7 +299,11 @@ impl StreamingTranscriber for SonioxProvider {
             // Otherwise: error path — retry via backoff
             match backoff.next_delay() {
                 Some(d) => tokio::time::sleep(d).await,
-                None => return Err(SttError::ReconnectExhausted { attempts: backoff.attempts() }),
+                None => {
+                    return Err(SttError::ReconnectExhausted {
+                        attempts: backoff.attempts(),
+                    })
+                }
             }
         }
     }
@@ -400,7 +411,11 @@ mod tests {
         };
         let event = map_token(&tok, &mut seq, Instant::now());
         match event {
-            TranscriptEvent::Partial { seq: s, text, language } => {
+            TranscriptEvent::Partial {
+                seq: s,
+                text,
+                language,
+            } => {
                 assert_eq!(s, 0);
                 assert_eq!(text, "Xin chào");
                 assert_eq!(language.as_deref(), Some("vi"));
@@ -425,7 +440,13 @@ mod tests {
         };
         let event = map_token(&tok, &mut seq, Instant::now());
         match event {
-            TranscriptEvent::Final { seq: s, text, start, end, .. } => {
+            TranscriptEvent::Final {
+                seq: s,
+                text,
+                start,
+                end,
+                ..
+            } => {
                 assert_eq!(s, 5);
                 assert_eq!(text, "Hello");
                 assert_eq!(start, Duration::from_millis(1000));
@@ -450,7 +471,13 @@ mod tests {
         };
         let event = map_token(&tok, &mut seq, Instant::now());
         match event {
-            TranscriptEvent::Translation { source_lang, target_lang, text, is_final, .. } => {
+            TranscriptEvent::Translation {
+                source_lang,
+                target_lang,
+                text,
+                is_final,
+                ..
+            } => {
                 assert_eq!(source_lang, "vi");
                 assert_eq!(target_lang, "en");
                 assert_eq!(text, "Hello");

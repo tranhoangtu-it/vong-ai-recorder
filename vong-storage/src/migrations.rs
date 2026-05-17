@@ -16,15 +16,19 @@ mod tests {
         let m = migrations();
         // rusqlite_migration validates SQL syntax + ordering on construction
         // (real validation happens via SQLite when applied — see db.rs tests).
-        assert_eq!(m.current_version(&rusqlite::Connection::open_in_memory().unwrap()).unwrap(),
-                   rusqlite_migration::SchemaVersion::NoneSet);
+        assert_eq!(
+            m.current_version(&rusqlite::Connection::open_in_memory().unwrap())
+                .unwrap(),
+            rusqlite_migration::SchemaVersion::NoneSet
+        );
     }
 
     #[test]
     fn migrations_apply_clean() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         let m = migrations();
-        m.to_latest(&mut conn).expect("migrations should apply cleanly");
+        m.to_latest(&mut conn)
+            .expect("migrations should apply cleanly");
 
         // Verify tables exist
         let tables: Vec<String> = conn

@@ -48,6 +48,7 @@ mod reconnect;
 mod soniox;
 mod soniox_protocol;
 mod traits;
+mod whisper_local;
 
 pub use api_key::ApiKey;
 pub use error::SttError;
@@ -55,6 +56,7 @@ pub use events::TranscriptEvent;
 pub use reconnect::ExponentialBackoff;
 pub use soniox::SonioxProvider;
 pub use traits::{StreamOpts, StreamingTranscriber};
+pub use whisper_local::{WhisperLocalProvider, DEFAULT_MODEL_FILENAME};
 
 /// Crate version.
 pub fn version() -> &'static str {

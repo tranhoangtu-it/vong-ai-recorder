@@ -72,12 +72,13 @@ pub async fn run_resampler(
         /* nbr_channels = */ TARGET_CHANNELS as usize, // post-downmix
     )?;
 
-    // Pre-allocated buffers per channel (rubato requires `Vec<Vec<f32>>`)
-    let mut input_buf: Vec<Vec<f32>> = vec![Vec::with_capacity(frames_per_chunk); TARGET_CHANNELS as usize];
-    let mut output_buf: Vec<Vec<f32>> = vec![
-        Vec::with_capacity(frames_per_chunk * 2);
-        TARGET_CHANNELS as usize
-    ];
+    // Pre-allocated buffers per channel (rubato 0.16 `process_into_buffer` requires
+    // output Vecs to have `len()` ≥ `output_frames_max()`, not just capacity).
+    // We size to the worst case once and reuse.
+    let out_max = resampler.output_frames_max();
+    let mut input_buf: Vec<Vec<f32>> =
+        vec![Vec::with_capacity(frames_per_chunk); TARGET_CHANNELS as usize];
+    let mut output_buf: Vec<Vec<f32>> = vec![vec![0f32; out_max]; TARGET_CHANNELS as usize];
 
     // Scratch interleaved buffer for ring-buffer read
     let mut scratch_interleaved = vec![0i16; cfg.read_chunk_size];
@@ -90,24 +91,23 @@ pub async fn run_resampler(
                 // Copy out of ring (chunk is bounded by ring topology, safe to consume).
                 let (first, second) = chunk.as_slices();
                 scratch_interleaved[..first.len()].copy_from_slice(first);
-                scratch_interleaved[first.len()..first.len() + second.len()].copy_from_slice(second);
+                scratch_interleaved[first.len()..first.len() + second.len()]
+                    .copy_from_slice(second);
                 chunk.commit_all();
 
                 // De-interleave + downmix → mono f32 in [-1.0, 1.0]
                 input_buf[0].clear();
-                downmix_to_mono_f32(
-                    &scratch_interleaved,
-                    cfg.source_channels,
-                    &mut input_buf[0],
-                );
+                downmix_to_mono_f32(&scratch_interleaved, cfg.source_channels, &mut input_buf[0]);
 
-                // Resample
+                // Ask rubato how many output frames this call will produce, then
+                // resample. We only quantize the valid prefix — the rest of the
+                // pre-sized output_buf is stale (would over-count and add zeros).
+                let out_frames = resampler.output_frames_next();
                 resampler.process_into_buffer(&input_buf, &mut output_buf, None)?;
 
-                // Quantize f32 → i16
-                let out_frames = output_buf[0].len();
+                // Quantize f32 → i16 — only the valid prefix
                 let mut out_pcm16 = Vec::with_capacity(out_frames);
-                for &s in &output_buf[0] {
+                for &s in &output_buf[0][..out_frames] {
                     let q = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     out_pcm16.push(q);
                 }

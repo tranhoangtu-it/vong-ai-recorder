@@ -72,7 +72,8 @@ impl UtteranceBuilder {
 
     /// Finalize the builder into an immutable `Utterance`.
     pub fn build(self) -> Utterance {
-        let duration_ms = ((self.samples.len() as u64 * 1000) / TARGET_SAMPLE_RATE_HZ as u64) as u32;
+        let duration_ms =
+            ((self.samples.len() as u64 * 1000) / TARGET_SAMPLE_RATE_HZ as u64) as u32;
         Utterance {
             id: Uuid::new_v4(),
             seq: self.seq,

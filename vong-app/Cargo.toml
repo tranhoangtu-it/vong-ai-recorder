@@ -11,18 +11,37 @@ description = "Vọng STT — desktop audio recording + multilingual transcripti
 name = "vong"
 path = "src/main.rs"
 
+# Opt-in features cascade from vong-stt. To build the GPU release on Windows:
+#   $env:VULKAN_SDK = "C:\VulkanSDK\<ver>"
+#   $env:CMAKE_GENERATOR = "Ninja"          # VS 2026 MSBuild + vulkan-shaders-gen broken
+#   cargo build --release --bin vong --features vulkan
+[features]
+default = []
+vulkan = ["vong-stt/vulkan"]
+
 [dependencies]
 slint = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = "0.2"        # Production crash log to file (GUI app stderr invisible)
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
-# Internal crates (commented out for Phase 0 — uncomment Phase 1+)
-# vong-audio = { workspace = true }
-# vong-stt = { workspace = true }
-# vong-storage = { workspace = true }
+# Phase 1 + 3 + 4 + 6 wired: mic capture → VAD → Whisper local STT → SQLite storage.
+vong-audio = { workspace = true }
+vong-stt = { workspace = true }
+vong-storage = { workspace = true }
+rtrb = "0.3"      # Ring buffer (we hold consumer side; resampler wiring comes Phase 1 proper)
+cpal = "0.17"     # For DeviceTrait::name() display in UI
+directories = "6" # Audio source preference config path (%APPDATA%\Vong\Vong\config\)
+
+# Phase 5 (partial) — system tray icon + global hotkey. Cross-platform Win + Mac + Linux.
+tray-icon = "0.24"      # System tray + menu
+global-hotkey = "0.8"   # Ctrl+Shift+R toggle window visibility
+muda = "0.19"           # Menu items used by tray-icon
+
+# Future phases:
 # vong-ui = { workspace = true }
 
 [build-dependencies]

@@ -26,6 +26,10 @@ pub use repository::{
 };
 pub use search::search_transcripts;
 
+// Re-export `rusqlite::Connection` so downstream crates can hold connection
+// handles without taking a direct dependency on the rusqlite crate.
+pub use rusqlite::Connection;
+
 /// Crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

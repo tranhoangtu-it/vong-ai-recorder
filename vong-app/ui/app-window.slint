@@ -1,39 +1,765 @@
-// Vọng STT — Phase 0 Hello Window
-// Phase 1+ will replace with real UI (tray, floating pill, dashboard).
+// Vọng STT — Phase 0 hello window.
+//
+// This is the Phase 0 scaffold preview, NOT the production dashboard. The full
+// dashboard / floating pill / tray menu / onboarding ship Phase 5+ and live in
+// `vong-ui/ui/*.slint`. Design tokens used here mirror `docs/design.md` so the
+// preview visually matches what later phases will build.
 
-import { Button, VerticalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, ComboBox } from "std-widgets.slint";
+
+// ---- Design tokens (mirrored from docs/design.md §1.2) ----
+// Promote to vong-ui/ui/tokens.slint in Phase 5 and @import there.
+global Tokens {
+    // Surfaces
+    out property <color> bg: #0A0A0A;
+    out property <color> surface: #171717;
+    out property <color> surface-hover: #262626;
+    out property <color> border: #404040;
+
+    // Text
+    out property <color> text-primary: #FAFAFA;
+    out property <color> text-secondary: #A3A3A3;
+    out property <color> text-hint: #737373;
+
+    // Accents
+    out property <color> accent: #8B5CF6;        // violet 500
+    out property <color> success: #4ADE80;       // green 400
+    out property <color> danger: #F87171;        // red 400
+
+    // Typography (px)
+    out property <length> font-display: 48px;
+    out property <length> font-h1: 28px;
+    out property <length> font-h2: 20px;
+    out property <length> font-body: 16px;
+    out property <length> font-secondary: 14px;
+    out property <length> font-caption: 12px;
+}
+
+component HeaderBar inherits Rectangle {
+    height: 48px;
+    background: Tokens.surface;
+    border-width: 0px;
+    drop-shadow-blur: 0px;
+
+    HorizontalBox {
+        padding-left: 20px;
+        padding-right: 20px;
+        alignment: space-between;
+
+        HorizontalBox {
+            spacing: 10px;
+            alignment: start;
+            Text {
+                text: "🔊";
+                font-size: 18px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: "Vọng";
+                font-size: Tokens.font-body;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "v0.1.0-alpha · Phase 0";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            vertical-alignment: center;
+        }
+    }
+
+    // Bottom hairline border
+    Rectangle {
+        x: 0; y: parent.height - 1px;
+        width: parent.width; height: 1px;
+        background: Tokens.border;
+    }
+}
+
+component StatusCard inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <color> dot-color: Tokens.success;
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 6px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            // Status dot
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: dot-color;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: title;
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: body;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Live audio peak meter — horizontal bar with green / yellow / red zones,
+// plus a footer line for downstream resampler progress.
+// Width is bound to `level` (0.0–1.0). Color cross-fades by threshold.
+component PeakMeter inherits Rectangle {
+    in property <float> level: 0.0;
+    in property <string> status;
+    in property <string> footer;
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: status;
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-secondary;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        // Track
+        Rectangle {
+            height: 8px;
+            background: #1f1f1f;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Tokens.border;
+            clip: true;
+
+            // Fill — width = parent * level. Color thresholds match RMS guidance:
+            //   0.0-0.70 green (safe), 0.70-0.90 yellow (warm), >0.90 red (clipping).
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width * level;
+                height: parent.height;
+                border-radius: 4px;
+                background: level > 0.9 ? Tokens.danger
+                          : level > 0.7 ? #FBBF24
+                          : Tokens.success;
+                animate width { duration: 80ms; easing: ease-out; }
+                animate background { duration: 120ms; }
+            }
+        }
+
+        Text {
+            text: footer;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+    }
+}
+
+// Onboarding banner — shown only on first launch. Dismissible. Compact intro
+// explaining the three killer features. Persists completion state in config.
+component OnboardingBanner inherits Rectangle {
+    callback dismiss();
+
+    background: #1a1133; // tinted violet for distinction from regular cards
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.accent;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+
+            HorizontalBox {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: "👋";
+                    font-size: 18px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "Chào mừng tới Vọng";
+                    font-size: Tokens.font-h2;
+                    font-weight: 800;
+                    color: Tokens.text-primary;
+                    vertical-alignment: center;
+                }
+            }
+
+            dismiss-touch := TouchArea {
+                width: 20px;
+                height: 20px;
+                clicked => { root.dismiss(); }
+                Text {
+                    text: "✕";
+                    font-size: 14px;
+                    color: dismiss-touch.has-hover ? Tokens.text-primary : Tokens.text-hint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: "🎙  Ghi mic hoặc loopback từ Speakers (chọn ở mục bên dưới).\n🧠  Whisper Base xử lý local — không gửi audio lên cloud.\n🔎  Tìm bản phiên âm với FTS5 — không dấu vẫn khớp (\"viet\" → \"Việt\").";
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+
+        cta-touch := TouchArea {
+            height: 32px;
+            clicked => { root.dismiss(); }
+            Rectangle {
+                background: cta-touch.has-hover ? Tokens.accent : #7c4ce6;
+                border-radius: 6px;
+                animate background { duration: 100ms; }
+                Text {
+                    text: "Bắt đầu sử dụng  →";
+                    font-size: Tokens.font-secondary;
+                    font-weight: 600;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// Audio source picker — enumerates input + output devices. Selecting an output
+// captures via WASAPI loopback (Windows system audio). Selection persists to
+// config; restart required for the new source to take effect.
+component AudioSourceCard inherits Rectangle {
+    in property <[string]> sources;
+    in property <string> current;
+    in property <bool> restart-needed;
+    callback selected(string);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Nguồn âm thanh — chọn mic hoặc speakers (loopback)";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        ComboBox {
+            model: sources;
+            current-value: current;
+            selected(value) => {
+                root.selected(value);
+            }
+        }
+
+        if restart-needed: Text {
+            text: "↻  Đã lưu — khởi động lại Vọng để áp dụng";
+            font-size: Tokens.font-caption;
+            color: Tokens.danger;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// Export action card — single button "📥 Xuất Markdown" + status text.
+// Exports the most-recent session's segments to `~/Documents/Vong/`.
+component ExportCard inherits Rectangle {
+    in property <string> status;
+    callback export-clicked();
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+        alignment: space-between;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.success;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: status == "" ? "Xuất phiên ghi mới nhất → Markdown" : status;
+                font-size: Tokens.font-caption;
+                color: status == "" ? Tokens.text-secondary : Tokens.text-primary;
+                vertical-alignment: center;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+        }
+
+        btn := TouchArea {
+            width: 140px;
+            height: 28px;
+            clicked => { root.export-clicked(); }
+            Rectangle {
+                background: btn.has-hover ? Tokens.accent : #6d3fe0;
+                border-radius: 4px;
+                animate background { duration: 100ms; }
+                Text {
+                    text: "📥  Xuất Markdown";
+                    font-size: Tokens.font-caption;
+                    font-weight: 600;
+                    color: white;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// History + FTS5 search card — when input is empty, `text` holds the recent
+// sessions list (refreshed ~1 Hz). When non-empty, Rust runs `search_transcripts`
+// against the FTS5 virtual table (Vietnamese tone-insensitive via remove_diacritics=2)
+// and `text` holds the formatted hits. Single Slint text node, dual-purpose data.
+component HistoryCard inherits Rectangle {
+    in property <string> text;
+    callback search-changed(string);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Tìm phiên (gõ 'viet' để khớp 'Việt', 'viết', 'việc')";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        LineEdit {
+            placeholder-text: "Bỏ trống = lịch sử gần đây · Có gõ = full-text search FTS5";
+            edited(t) => {
+                root.search-changed(t);
+            }
+        }
+
+        Text {
+            text: text;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Floating Pill — borderless always-on-top overlay shown alongside main window
+// during recording. Compact view of live state for distraction-free monitoring.
+//
+// Sized per docs/design.md §3 S2 (360×140 — slightly taller than spec to fit
+// the live-transcript line at body font without elide).
+export component FloatingPill inherits Window {
+    title: "Vọng — Live";
+    width: 360px;
+    height: 140px;
+    background: transparent;
+    no-frame: true;
+    always-on-top: true;
+    default-font-size: Tokens.font-secondary;
+
+    in property <float> peak-level: 0.0;
+    in property <string> last-transcript: "";
+    in property <int> utterance-count: 0;
+    in property <int> elapsed-seconds: 0;
+    in property <string> language-tag: "vi";
+    callback close-requested();
+
+    Rectangle {
+        background: Tokens.surface;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Tokens.border;
+        // Subtle drop shadow via offset child
+        drop-shadow-blur: 16px;
+        drop-shadow-color: #00000060;
+        drop-shadow-offset-y: 2px;
+
+        VerticalBox {
+            padding: 12px;
+            spacing: 8px;
+
+            // Header — recording dot, timer, language, utterance count, close button
+            HorizontalBox {
+                spacing: 8px;
+                alignment: space-between;
+
+                HorizontalBox {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: Tokens.danger;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: timer-format(elapsed-seconds);
+                        font-size: Tokens.font-secondary;
+                        font-weight: 600;
+                        color: Tokens.text-primary;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "·  " + language-tag;
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-hint;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "·  " + utterance-count + " utt";
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-hint;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Close indicator (clicking quits app — Slint default for close window)
+                close-touch := TouchArea {
+                    width: 18px;
+                    height: 18px;
+                    clicked => { root.close-requested(); }
+                    Text {
+                        text: "✕";
+                        font-size: 14px;
+                        color: close-touch.has-hover ? Tokens.text-primary : Tokens.text-hint;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Live transcript line (single line, elide if too long)
+            Text {
+                text: last-transcript == "" ? "Hãy nói…" : last-transcript;
+                font-size: Tokens.font-body;
+                color: last-transcript == "" ? Tokens.text-hint : Tokens.text-primary;
+                wrap: no-wrap;
+                overflow: elide;
+            }
+
+            // Mini peak meter
+            Rectangle {
+                height: 4px;
+                background: #1f1f1f;
+                border-radius: 2px;
+                border-width: 1px;
+                border-color: Tokens.border;
+                clip: true;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width * peak-level;
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: peak-level > 0.9 ? Tokens.danger
+                              : peak-level > 0.7 ? #FBBF24
+                              : Tokens.success;
+                    animate width { duration: 80ms; easing: ease-out; }
+                }
+            }
+        }
+    }
+
+    // mm:ss formatter — pure Slint expression (no Rust callback needed)
+    pure function timer-format(seconds: int) -> string {
+        Math.floor(seconds / 60) + ":" + (Math.mod(seconds, 60) < 10 ? "0" : "") + Math.mod(seconds, 60)
+    }
+}
+
+// Transcript display — shows latest Whisper Final text, or a hint when empty,
+// plus a footer line indicating SQLite persistence status.
+component TranscriptCard inherits Rectangle {
+    in property <string> text;
+    in property <string> storage;
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 6px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Bản phiên âm gần nhất";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: text == "" ? "Hãy nói gì đó — Whisper Base sẽ xử lý mỗi utterance VAD đóng gói…" : text;
+            font-size: Tokens.font-body;
+            color: text == "" ? Tokens.text-hint : Tokens.text-primary;
+            wrap: word-wrap;
+            horizontal-alignment: left;
+        }
+
+        Text {
+            text: storage;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+    }
+}
 
 export component AppWindow inherits Window {
     title: "Vọng";
-    width: 480px;
-    height: 320px;
-    background: #0a0a0a;
+    width: 720px;
+    // Banner adds ~120 px when first-launch; fixed height keeps Slint layout
+    // simple (no jump on dismiss). User gets extra breathing room post-dismiss.
+    height: 1000px;
+    background: Tokens.bg;
+    icon: @image-url("");
+
+    // Driven by Rust at ~30 fps via Slint Timer.
+    //   peak-level       — [0.0, 1.0] from vong-audio PeakMeter
+    //   audio-status     — device + sample rate, or error if mic unavailable
+    //   pipeline-status  — "🔇 Listening…" idle / "🗣 N utterances · …" active
+    //   last-transcript  — most recent Whisper Final text (empty until first utterance)
+    //   storage-status   — "📝 Session #N · X segments saved" or "📝 In-memory only"
+    //   history-status   — formatted recent-sessions list (refreshed ~1Hz)
+    in property <float> peak-level: 0.0;
+    in property <string> audio-status: "Khởi tạo microphone…";
+    in property <string> pipeline-status: "🔇  Listening…";
+    in property <string> last-transcript: "";
+    in property <string> storage-status: "📝  Initializing storage…";
+    in property <string> history-status: "📜  Đang tải lịch sử…";
+    callback search-changed(string);
+
+    // Audio source picker
+    in property <[string]> audio-sources;
+    in property <string> current-audio-source;
+    in property <bool> restart-needed: false;
+    callback audio-source-changed(string);
+
+    // Onboarding banner — only visible on first launch.
+    in-out property <bool> onboarding-visible: false;
+    callback dismiss-onboarding();
+
+    // Export action
+    in property <string> export-status: "";
+    callback export-clicked();
 
     VerticalBox {
-        alignment: center;
-        spacing: 16px;
-        padding: 32px;
+        padding: 0px;
+        spacing: 0px;
 
-        Text {
-            text: "🔊 Vọng";
-            font-size: 48px;
-            font-weight: 800;
-            color: #8b5cf6;
-            horizontal-alignment: center;
+        HeaderBar { }
+
+        // Hero zone
+        VerticalBox {
+            alignment: center;
+            padding-top: 36px;
+            padding-bottom: 24px;
+            padding-left: 48px;
+            padding-right: 48px;
+            spacing: 12px;
+
+            Text {
+                text: "🔊";
+                font-size: Tokens.font-display;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "Vọng";
+                font-size: Tokens.font-h1;
+                font-weight: 800;
+                color: Tokens.accent;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "Cuộc họp đa ngôn ngữ.\nKhông một câu bị bỏ sót.";
+                font-size: Tokens.font-body;
+                color: Tokens.text-secondary;
+                horizontal-alignment: center;
+            }
         }
 
-        Text {
-            text: "Cuộc họp đa ngôn ngữ.\nKhông một câu bị bỏ sót.";
-            font-size: 16px;
-            color: #a3a3a3;
-            horizontal-alignment: center;
+        // Status zone
+        VerticalBox {
+            padding-left: 48px;
+            padding-right: 48px;
+            padding-bottom: 20px;
+            spacing: 10px;
+
+            StatusCard {
+                // Status indicator: dot color encodes state, no glyph fallback risk.
+                title: "Phase 0 — Scaffolding complete";
+                body: "Workspace ready · 5 crates compile · Slint UI booted · Logging armed · CI gates green";
+                dot-color: Tokens.success;
+            }
+
+            if onboarding-visible: OnboardingBanner {
+                dismiss => {
+                    root.onboarding-visible = false;
+                    root.dismiss-onboarding();
+                }
+            }
+
+            AudioSourceCard {
+                sources: audio-sources;
+                current: current-audio-source;
+                restart-needed: restart-needed;
+                selected(v) => {
+                    root.audio-source-changed(v);
+                }
+            }
+
+            HistoryCard {
+                text: history-status;
+                search-changed(q) => {
+                    root.search-changed(q);
+                }
+            }
+
+            ExportCard {
+                status: export-status;
+                export-clicked => {
+                    root.export-clicked();
+                }
+            }
+
+            PeakMeter {
+                level: peak-level;
+                status: audio-status;
+                footer: pipeline-status;
+            }
+
+            TranscriptCard {
+                text: last-transcript;
+                storage: storage-status;
+            }
         }
 
-        Text {
-            text: "Phase 0 — Scaffolding complete ✓";
-            font-size: 12px;
-            color: #4ade80;
-            horizontal-alignment: center;
+        // Footer
+        Rectangle {
+            height: 36px;
+            background: Tokens.surface;
+
+            HorizontalBox {
+                padding-left: 20px;
+                padding-right: 20px;
+                alignment: space-between;
+
+                Text {
+                    text: "Privacy-first · BYOK · Audio never leaves your device";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "vong.app";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Top hairline border
+            Rectangle {
+                x: 0; y: 0;
+                width: parent.width; height: 1px;
+                background: Tokens.border;
+            }
         }
     }
 }

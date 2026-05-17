@@ -8,8 +8,8 @@ use rtrb::RingBuffer;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use vong_audio::{
-    default_input_device, run_resampler, start_capture, AudioError, OverflowCounter, PeakMeter,
-    ResampleConfig, TARGET_SAMPLE_RATE_HZ,
+    default_input_device, run_resampler, start_capture, AudioError, DeviceKind, OverflowCounter,
+    PeakMeter, ResampleConfig, TARGET_SAMPLE_RATE_HZ,
 };
 
 const TEST_DURATION_SEC: u64 = 1;
@@ -32,7 +32,13 @@ async fn captures_one_second_resamples_to_16khz_mono() {
     let peak = PeakMeter::new();
     let overflow = OverflowCounter::new();
 
-    let handle = match start_capture(&device, tx, peak.clone(), overflow.clone()) {
+    let handle = match start_capture(
+        &device,
+        DeviceKind::Input,
+        tx,
+        peak.clone(),
+        overflow.clone(),
+    ) {
         Ok(h) => h,
         Err(e) => {
             // Some Windows CI / sandboxed environments fail at stream build
@@ -56,22 +62,26 @@ async fn captures_one_second_resamples_to_16khz_mono() {
         read_chunk_size: 2048,
     };
     let resampler_join = tokio::spawn(async move {
-        let _ = run_resampler(rx, out_tx, cfg).await;
+        if let Err(e) = run_resampler(rx, out_tx, cfg).await {
+            eprintln!("resampler task ended with error: {e:?}");
+        }
     });
 
     // Collect for TEST_DURATION_SEC seconds
-    let mut all_samples = Vec::with_capacity(TARGET_SAMPLE_RATE_HZ as usize * TEST_DURATION_SEC as usize);
+    let mut all_samples =
+        Vec::with_capacity(TARGET_SAMPLE_RATE_HZ as usize * TEST_DURATION_SEC as usize);
     let collect_deadline = tokio::time::Instant::now() + Duration::from_secs(TEST_DURATION_SEC + 1);
 
     while tokio::time::Instant::now() < collect_deadline {
         match tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await {
             Ok(Some(chunk)) => {
                 all_samples.extend(chunk);
-                if all_samples.len() >= TARGET_SAMPLE_RATE_HZ as usize * TEST_DURATION_SEC as usize {
+                if all_samples.len() >= TARGET_SAMPLE_RATE_HZ as usize * TEST_DURATION_SEC as usize
+                {
                     break;
                 }
             }
-            Ok(None) => break,        // channel closed
+            Ok(None) => break,         // channel closed
             Err(_timeout) => continue, // no chunk in 200ms — keep waiting
         }
     }

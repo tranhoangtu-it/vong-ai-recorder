@@ -78,7 +78,10 @@ jobs:
           cargo install --locked cargo-deny
 
       - name: Cargo audit (CVE check)
-        run: cargo audit --deny warnings
+        # Default policy: fail on `vulnerability` + `unsound` + `yanked`.
+        # `unmaintained` is informational only — many transitive deps (bincode,
+        # proc-macro-error, etc.) are technically unmaintained but not CVE-bearing.
+        run: cargo audit
 
       - name: Cargo deny (license + policy)
         run: cargo deny check

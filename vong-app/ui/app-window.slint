@@ -592,11 +592,30 @@ component TranscriptStream inherits Rectangle {
             min-height: 200px;
             VerticalLayout {
                 spacing: 4px;
-                if lines.length == 0: Text {
-                    text: "  Hãy nói gì đó — mỗi utterance VAD pack sẽ xuất hiện ở đây với timestamp + ngôn ngữ phát hiện.";
-                    font-size: Tokens.font-caption;
-                    color: Tokens.text-hint;
-                    wrap: word-wrap;
+                alignment: lines.length == 0 ? center : start;
+                if lines.length == 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Text {
+                        text: "🎙";
+                        font-size: 48px;
+                        horizontal-alignment: center;
+                        color: Tokens.text-hint;
+                    }
+                    Text {
+                        text: "Đang chờ giọng nói…";
+                        font-size: Tokens.font-h2;
+                        font-weight: 600;
+                        color: Tokens.text-secondary;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "Mỗi câu được VAD đóng gói sẽ xuất hiện ở đây\nvới timestamp + ngôn ngữ phát hiện.";
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-hint;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
                 }
                 for line in lines: HorizontalBox {
                     spacing: 12px;

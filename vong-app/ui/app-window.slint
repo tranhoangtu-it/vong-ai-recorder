@@ -687,10 +687,9 @@ component TranscriptCard inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "Vọng";
-    width: 720px;
-    // Banner adds ~120 px when first-launch; fixed height keeps Slint layout
-    // simple (no jump on dismiss). User gets extra breathing room post-dismiss.
-    height: 1200px;
+    // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
+    width: 1280px;
+    height: 800px;
     background: Tokens.bg;
     icon: @image-url("");
 
@@ -724,101 +723,110 @@ export component AppWindow inherits Window {
     in property <string> export-status: "";
     callback export-clicked();
 
+    // ──── Soniox-inspired layout ─────────────────────────────────────
+    //   Header bar (compact)
+    //   ┌─────────────┬──────────────────────────────────────────────┐
+    //   │ Sidebar     │  Main content                                │
+    //   │  280 px     │   - Live transcript stream (primary)         │
+    //   │             │   - Peak meter + pipeline status (secondary) │
+    //   │  • Source   │                                              │
+    //   │  • History  │                                              │
+    //   │  • Search   │                                              │
+    //   │  • Export   │                                              │
+    //   └─────────────┴──────────────────────────────────────────────┘
+    //   Footer (compact)
+    //
+    // Hero block + Phase 0 status card removed — Soniox dashboards prioritize
+    // the transcript over branding chrome. App branding stays in HeaderBar
+    // (logo + "Vọng" text) and footer ("vong.app · Privacy-first · BYOK").
     VerticalBox {
         padding: 0px;
         spacing: 0px;
 
         HeaderBar { }
 
-        // Hero zone
-        VerticalBox {
-            alignment: center;
-            padding-top: 36px;
-            padding-bottom: 24px;
-            padding-left: 48px;
-            padding-right: 48px;
-            spacing: 12px;
+        // Two-column body. Sidebar left, transcript-dominated main right.
+        HorizontalBox {
+            spacing: 0px;
+            padding: 0px;
 
-            Text {
-                text: "🔊";
-                font-size: Tokens.font-display;
-                horizontal-alignment: center;
+            // Sidebar — fixed 280 px, scrollable if cramped
+            Rectangle {
+                width: 280px;
+                background: #0d0d0d;  // slightly darker than bg for sidebar separation
+                border-width: 0;
+                // Right hairline border
+                Rectangle {
+                    x: parent.width - 1px;
+                    y: 0;
+                    width: 1px;
+                    height: parent.height;
+                    background: Tokens.border;
+                }
+
+                ScrollView {
+                    VerticalBox {
+                        padding: 12px;
+                        spacing: 10px;
+
+                        if onboarding-visible: OnboardingBanner {
+                            dismiss => {
+                                root.onboarding-visible = false;
+                                root.dismiss-onboarding();
+                            }
+                        }
+
+                        AudioSourceCard {
+                            sources: audio-sources;
+                            current: current-audio-source;
+                            restart-needed: restart-needed;
+                            selected(v) => {
+                                root.audio-source-changed(v);
+                            }
+                        }
+
+                        HistoryCard {
+                            text: history-status;
+                            search-changed(q) => {
+                                root.search-changed(q);
+                            }
+                        }
+
+                        ExportCard {
+                            status: export-status;
+                            export-clicked => {
+                                root.export-clicked();
+                            }
+                        }
+                    }
+                }
             }
 
-            Text {
-                text: "Vọng";
-                font-size: Tokens.font-h1;
-                font-weight: 800;
-                color: Tokens.accent;
-                horizontal-alignment: center;
-            }
+            // Main content — transcript-first
+            VerticalBox {
+                padding: 16px;
+                spacing: 10px;
+                horizontal-stretch: 1;
 
-            Text {
-                text: "Cuộc họp đa ngôn ngữ.\nKhông một câu bị bỏ sót.";
-                font-size: Tokens.font-body;
-                color: Tokens.text-secondary;
-                horizontal-alignment: center;
+                TranscriptStream {
+                    lines: transcript-lines;
+                    vertical-stretch: 1;
+                }
+
+                PeakMeter {
+                    level: peak-level;
+                    status: audio-status;
+                    footer: pipeline-status;
+                }
             }
         }
 
-        // Status zone
-        VerticalBox {
-            padding-left: 48px;
-            padding-right: 48px;
-            padding-bottom: 20px;
-            spacing: 10px;
-
-            StatusCard {
-                // Status indicator: dot color encodes state, no glyph fallback risk.
-                title: "Phase 0 — Scaffolding complete";
-                body: "Workspace ready · 5 crates compile · Slint UI booted · Logging armed · CI gates green";
-                dot-color: Tokens.success;
-            }
-
-            if onboarding-visible: OnboardingBanner {
-                dismiss => {
-                    root.onboarding-visible = false;
-                    root.dismiss-onboarding();
-                }
-            }
-
-            AudioSourceCard {
-                sources: audio-sources;
-                current: current-audio-source;
-                restart-needed: restart-needed;
-                selected(v) => {
-                    root.audio-source-changed(v);
-                }
-            }
-
-            HistoryCard {
-                text: history-status;
-                search-changed(q) => {
-                    root.search-changed(q);
-                }
-            }
-
-            ExportCard {
-                status: export-status;
-                export-clicked => {
-                    root.export-clicked();
-                }
-            }
-
-            PeakMeter {
-                level: peak-level;
-                status: audio-status;
-                footer: pipeline-status;
-            }
-
-            TranscriptStream {
-                lines: transcript-lines;
-            }
-
-            TranscriptCard {
-                text: last-transcript;
-                storage: storage-status;
-            }
+        // Hidden placeholder kept so original `last-transcript` property still
+        // has a consumer (the FloatingPill mirrors it). No visible card now —
+        // primary surface for transcripts is `TranscriptStream` above.
+        if false: TranscriptCard {
+            text: last-transcript;
+            storage: storage-status;
         }
 
         // Footer

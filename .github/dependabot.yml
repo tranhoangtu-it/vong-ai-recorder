@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Cargo dependencies — group minor + patch into single weekly PR to avoid noise
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # Major bumps come as separate PRs so we review each
+    ignore:
+      # Pinned versions per Cargo.toml comments — bump manually only:
+      - dependency-name: "cpal"
+      - dependency-name: "rubato"
+      - dependency-name: "keyring"
+      - dependency-name: "whisper-rs"
+      - dependency-name: "tokio-tungstenite"
+
+  # GitHub Actions — keep workflow actions current (rust-toolchain@stable,
+  # actions/checkout, Swatinem/rust-cache, etc.)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 3

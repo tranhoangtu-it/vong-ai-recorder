@@ -5,7 +5,16 @@
 // `vong-ui/ui/*.slint`. Design tokens used here mirror `docs/design.md` so the
 // preview visually matches what later phases will build.
 
-import { VerticalBox, HorizontalBox, LineEdit, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
+
+// Soniox-style transcript line — single utterance with timestamp + language tag.
+struct TranscriptLine {
+    seq: int,
+    time: string,       // "14:30"
+    lang: string,       // "vi"
+    text: string,
+    duration-ms: int,   // for confidence dimming if needed
+}
 
 // ---- Design tokens (mirrored from docs/design.md §1.2) ----
 // Promote to vong-ui/ui/tokens.slint in Phase 5 and @import there.
@@ -546,6 +555,84 @@ export component FloatingPill inherits Window {
     }
 }
 
+// Soniox-style scrolling transcript stream — list of utterance lines with
+// timestamps + language tag + body text. Auto-scrolls to bottom on new line
+// (Slint ScrollView preserves scroll position; new lines append so user
+// sees latest at bottom).
+component TranscriptStream inherits Rectangle {
+    in property <[TranscriptLine]> lines;
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.danger;  // red = recording (Soniox pattern)
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Bản phiên âm trực tiếp  ·  " + lines.length + " dòng";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        // Scrollable list area. Slint ScrollView expands inside parent flex.
+        ScrollView {
+            min-height: 200px;
+            VerticalLayout {
+                spacing: 4px;
+                if lines.length == 0: Text {
+                    text: "  Hãy nói gì đó — mỗi utterance VAD pack sẽ xuất hiện ở đây với timestamp + ngôn ngữ phát hiện.";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    wrap: word-wrap;
+                }
+                for line in lines: HorizontalBox {
+                    spacing: 12px;
+                    alignment: start;
+                    padding: 4px;
+                    Text {
+                        text: line.time;
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-hint;
+                        vertical-alignment: top;
+                        width: 56px;
+                    }
+                    Text {
+                        text: line.lang;
+                        font-size: Tokens.font-caption;
+                        color: Tokens.accent;
+                        font-weight: 600;
+                        vertical-alignment: top;
+                        width: 28px;
+                    }
+                    Text {
+                        text: line.text == "" ? "(silence)" : line.text;
+                        font-size: Tokens.font-secondary;
+                        color: line.text == "" ? Tokens.text-hint : Tokens.text-primary;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Transcript display — shows latest Whisper Final text, or a hint when empty,
 // plus a footer line indicating SQLite persistence status.
 component TranscriptCard inherits Rectangle {
@@ -603,7 +690,7 @@ export component AppWindow inherits Window {
     width: 720px;
     // Banner adds ~120 px when first-launch; fixed height keeps Slint layout
     // simple (no jump on dismiss). User gets extra breathing room post-dismiss.
-    height: 1000px;
+    height: 1200px;
     background: Tokens.bg;
     icon: @image-url("");
 
@@ -620,6 +707,7 @@ export component AppWindow inherits Window {
     in property <string> last-transcript: "";
     in property <string> storage-status: "📝  Initializing storage…";
     in property <string> history-status: "📜  Đang tải lịch sử…";
+    in property <[TranscriptLine]> transcript-lines: [];
     callback search-changed(string);
 
     // Audio source picker
@@ -721,6 +809,10 @@ export component AppWindow inherits Window {
                 level: peak-level;
                 status: audio-status;
                 footer: pipeline-status;
+            }
+
+            TranscriptStream {
+                lines: transcript-lines;
             }
 
             TranscriptCard {

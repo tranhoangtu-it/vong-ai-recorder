@@ -12,6 +12,7 @@ mod tray;
 
 use cpal::traits::DeviceTrait;
 use rtrb::RingBuffer;
+use slint::Model;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -91,6 +92,20 @@ struct PipelineState {
     session_id: AtomicU64,
     /// Number of `transcript_segments` rows successfully inserted this run.
     segments_persisted: AtomicU64,
+    /// Soniox-style scrolling transcript stream. Each new Final event appends
+    /// a line; UI Timer copies into the Slint VecModel for rendering.
+    transcript_stream: Mutex<Vec<TranscriptStreamLine>>,
+}
+
+/// Local mirror of Slint's `TranscriptLine` struct for in-Rust storage.
+/// Converted to the Slint-generated struct only when pushing to the model.
+#[derive(Debug, Clone)]
+struct TranscriptStreamLine {
+    seq: i32,
+    time: String,
+    lang: String,
+    text: String,
+    duration_ms: i32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -330,6 +345,14 @@ fn init_audio(
         });
     }
 
+    // Soniox-style transcript stream — Slint VecModel held outside Timer so
+    // we can push lines into it from the event consumer indirectly (via the
+    // shared PipelineState mutex). The Timer mirrors the Rust Vec into Slint
+    // model whenever the length differs (cheap: integer compare per tick).
+    let transcript_model: Rc<slint::VecModel<TranscriptLine>> =
+        Rc::new(slint::VecModel::from(Vec::<TranscriptLine>::new()));
+    ui.set_transcript_lines(slint::ModelRc::from(transcript_model.clone()));
+
     // Slint timer @ ~30 fps: pull pipeline state into both windows (main + pill).
     // History card is heavier (DB query) — throttled to ~1 Hz via tick counter.
     let ui_weak = ui.as_weak();
@@ -338,6 +361,7 @@ fn init_audio(
     let state_ui = state.clone();
     let session_for_timer = session.as_ref().map(SessionContext::clone_for_task);
     let current_query_for_timer = current_query.clone();
+    let transcript_model_for_timer = transcript_model.clone();
     let mut ticks: u32 = 0;
     let timer = slint::Timer::default();
     timer.start(
@@ -427,6 +451,27 @@ fn init_audio(
                 pill.set_utterance_count(count as i32);
                 pill.set_elapsed_seconds(elapsed);
                 pill.set_language_tag(language.into());
+            }
+
+            // Sync Soniox-style transcript stream from Rust Vec → Slint VecModel.
+            // Only re-push when length differs (cheap; appending lines is common).
+            if let Ok(stream) = state_ui.transcript_stream.lock() {
+                if stream.len() != transcript_model_for_timer.row_count() {
+                    // Truncate + extend. We push all rows because Slint VecModel
+                    // doesn't expose a fast "replace from N" — but ≤200 entries so
+                    // this is cheap (microseconds).
+                    let new_rows: Vec<TranscriptLine> = stream
+                        .iter()
+                        .map(|l| TranscriptLine {
+                            seq: l.seq,
+                            time: l.time.clone().into(),
+                            lang: l.lang.clone().into(),
+                            text: l.text.clone().into(),
+                            duration_ms: l.duration_ms,
+                        })
+                        .collect();
+                    transcript_model_for_timer.set_vec(new_rows);
+                }
             }
 
             // History card: throttle DB query to ~1 Hz. Skip when user is
@@ -1027,6 +1072,36 @@ fn spawn_whisper_pipeline(
                         }
                         if let Ok(mut g) = state.last_language.lock() {
                             *g = language.clone().unwrap_or_default();
+                        }
+                    }
+
+                    // Append to Soniox-style scrolling transcript stream.
+                    // Wall-clock timestamp formatted hh:mm (24h).
+                    let wall_time = {
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        // ICT is UTC+7
+                        let local = (now + 7 * 3600) % 86400;
+                        let hh = local / 3600;
+                        let mm = (local % 3600) / 60;
+                        format!("{:02}:{:02}", hh, mm)
+                    };
+                    let line = TranscriptStreamLine {
+                        seq: seq as i32,
+                        time: wall_time,
+                        lang: language.clone().unwrap_or_else(|| "?".into()),
+                        text: text.clone(),
+                        duration_ms: end.as_millis() as i32,
+                    };
+                    if let Ok(mut s) = state.transcript_stream.lock() {
+                        s.push(line);
+                        // Cap stream at 200 lines to keep UI snappy. Older lines
+                        // still in DB via `transcript_segments` table.
+                        if s.len() > 200 {
+                            let drop_n = s.len() - 200;
+                            s.drain(..drop_n);
                         }
                     }
 

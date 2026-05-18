@@ -296,7 +296,7 @@ component AudioSourceCard inherits Rectangle {
                 y: (parent.height - self.height) / 2;
             }
             Text {
-                text: "Nguồn âm thanh — chọn mic hoặc speakers (loopback)";
+                text: "Nguồn âm thanh";
                 font-size: Tokens.font-secondary;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -348,7 +348,7 @@ component ExportCard inherits Rectangle {
                 y: (parent.height - self.height) / 2;
             }
             Text {
-                text: status == "" ? "Xuất phiên ghi mới nhất → Markdown" : status;
+                text: status == "" ? "Xuất Markdown" : status;
                 font-size: Tokens.font-caption;
                 color: status == "" ? Tokens.text-secondary : Tokens.text-primary;
                 vertical-alignment: center;
@@ -406,7 +406,7 @@ component HistoryCard inherits Rectangle {
                 y: (parent.height - self.height) / 2;
             }
             Text {
-                text: "Tìm phiên (gõ 'viet' để khớp 'Việt', 'viết', 'việc')";
+                text: "Tìm + Lịch sử";
                 font-size: Tokens.font-secondary;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -415,7 +415,7 @@ component HistoryCard inherits Rectangle {
         }
 
         LineEdit {
-            placeholder-text: "Bỏ trống = lịch sử gần đây · Có gõ = full-text search FTS5";
+            placeholder-text: "Tìm trong tất cả phiên ghi…";
             edited(t) => {
                 root.search-changed(t);
             }
@@ -750,9 +750,9 @@ export component AppWindow inherits Window {
             spacing: 0px;
             padding: 0px;
 
-            // Sidebar — fixed 280 px, scrollable if cramped
+            // Sidebar — fixed 320 px (Soniox uses ~280-320 px), scrollable
             Rectangle {
-                width: 280px;
+                width: 320px;
                 background: #0d0d0d;  // slightly darker than bg for sidebar separation
                 border-width: 0;
                 // Right hairline border

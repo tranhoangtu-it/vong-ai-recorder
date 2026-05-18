@@ -43,18 +43,20 @@ jobs:
       - name: Initialize WiX config (first run)
         shell: pwsh
         run: |
-          if (-not (Test-Path wix\main.wxs)) {
-            cargo wix init --force
+          # Workspace has multiple crates → must scope to `vong-app` (the binary).
+          if (-not (Test-Path vong-app\wix\main.wxs)) {
+            cargo wix init --package vong-app --force
           }
 
       - name: Build MSI installer
-        run: cargo wix --no-build --nocapture
+        run: cargo wix --package vong-app --no-build --nocapture
 
       - name: List release artifacts
         shell: pwsh
         run: |
-          Get-ChildItem target\wix -Filter "*.msi" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Output "$($_.Name) — $([math]::Round($_.Length/1MB,1)) MB"
+          # cargo-wix writes MSI to target/wix/ by default, regardless of package
+          Get-ChildItem -Recurse -Filter "*.msi" target -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Output "$($_.FullName) — $([math]::Round($_.Length/1MB,1)) MB"
           }
 
       - name: Upload release artifacts
@@ -64,6 +66,7 @@ jobs:
           path: |
             target/release/vong.exe
             target/wix/*.msi
+            target/**/wix/*.msi
           if-no-files-found: warn
 
       - name: Attach to GitHub Release
@@ -73,6 +76,7 @@ jobs:
           files: |
             target/release/vong.exe
             target/wix/*.msi
+            target/**/wix/*.msi
           draft: true
           prerelease: true
           generate_release_notes: true

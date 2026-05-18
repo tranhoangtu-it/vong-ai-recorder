@@ -1,29 +1,33 @@
 # cargo-deny policy — supply chain security
 # Plan v2 Section 15.2 — Run via: cargo deny check
+#
+# Schema: cargo-deny v2 (used by v0.18+). The old per-severity `vulnerability`,
+# `unsound`, `notice` keys were removed — vulnerabilities/unsound are now
+# inherent failures, no opt-in needed. `unmaintained` and `unlicensed` moved
+# to enum-shaped values ("all"/"workspace"/"transitive"/"none").
 
 [graph]
-# Windows-first pivot (temporary — macOS targets re-add when Phase 2 macOS loopback
-# work resumes). Windows MSVC is primary build target.
+# Windows-first pivot. Windows MSVC primary; macOS targets kept so
+# `#[cfg(target_os = "macos")]` deps surface CVEs/license issues too.
 targets = [
     { triple = "x86_64-pc-windows-msvc" },
     { triple = "aarch64-pc-windows-msvc" },
-    # Kept compiling under deny check so cross-platform deps surface CVEs/license issues:
     { triple = "x86_64-apple-darwin" },
     { triple = "aarch64-apple-darwin" },
 ]
 
 [advisories]
+version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "deny"
 yanked = "deny"
-notice = "warn"
+# `unmaintained = "none"` — don't fail on bincode/proc-macro-error/etc.
+# transitive deps that have no maintainer but no CVE either.
+unmaintained = "none"
 ignore = []
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -38,47 +42,21 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
 ]
-copyleft = "warn"  # Allow case-by-case via exceptions below
-default = "deny"
 confidence-threshold = 0.93
 
 # Slint dual-licensed — accepting GPL-3.0 for OSS core
 # (Pro tier commercial requires separate Slint Royalty-free license)
-[[licenses.exceptions]]
-name = "slint"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "slint-build"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-core"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-renderer-skia"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-renderer-software"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-common"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-compiler"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-backend-selector"
-allow = ["GPL-3.0"]
-
-[[licenses.exceptions]]
-name = "i-slint-backend-winit"
-allow = ["GPL-3.0"]
+exceptions = [
+    { name = "slint", allow = ["GPL-3.0"] },
+    { name = "slint-build", allow = ["GPL-3.0"] },
+    { name = "i-slint-core", allow = ["GPL-3.0"] },
+    { name = "i-slint-renderer-skia", allow = ["GPL-3.0"] },
+    { name = "i-slint-renderer-software", allow = ["GPL-3.0"] },
+    { name = "i-slint-common", allow = ["GPL-3.0"] },
+    { name = "i-slint-compiler", allow = ["GPL-3.0"] },
+    { name = "i-slint-backend-selector", allow = ["GPL-3.0"] },
+    { name = "i-slint-backend-winit", allow = ["GPL-3.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

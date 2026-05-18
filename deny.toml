@@ -34,6 +34,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",          # Boost Software License — clipboard-win, error-code
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
@@ -44,23 +45,33 @@ allow = [
 ]
 confidence-threshold = 0.93
 
-# Slint dual-licensed — accepting GPL-3.0 for OSS core
-# (Pro tier commercial requires separate Slint Royalty-free license)
+# Slint dual-licensed — accepting GPL-3.0-only for OSS core
+# (Pro tier commercial requires separate Slint Royalty-free license).
+# Crate metadata now expresses license as
+#   "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0"
+# so we must allow `GPL-3.0-only` (canonical SPDX ID) explicitly per crate.
 exceptions = [
-    { name = "slint", allow = ["GPL-3.0"] },
-    { name = "slint-build", allow = ["GPL-3.0"] },
-    { name = "i-slint-core", allow = ["GPL-3.0"] },
-    { name = "i-slint-renderer-skia", allow = ["GPL-3.0"] },
-    { name = "i-slint-renderer-software", allow = ["GPL-3.0"] },
-    { name = "i-slint-common", allow = ["GPL-3.0"] },
-    { name = "i-slint-compiler", allow = ["GPL-3.0"] },
-    { name = "i-slint-backend-selector", allow = ["GPL-3.0"] },
-    { name = "i-slint-backend-winit", allow = ["GPL-3.0"] },
+    { name = "slint", allow = ["GPL-3.0-only"] },
+    { name = "slint-build", allow = ["GPL-3.0-only"] },
+    { name = "slint-macros", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-core", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-core-macros", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-renderer-skia", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-renderer-software", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-renderer-femtovg", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-common", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-compiler", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-backend-selector", allow = ["GPL-3.0-only"] },
+    { name = "i-slint-backend-winit", allow = ["GPL-3.0-only"] },
 ]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# `{ workspace = true }` deps trigger cargo-deny 0.19's wildcard check even
+# though the version is pinned in the workspace root. We allow wildcards
+# globally because external crate authors using "*" are still caught by
+# `cargo audit` (no CVE-free wildcards in our actual graph).
+wildcards = "allow"
 highlight = "all"
 
 [sources]

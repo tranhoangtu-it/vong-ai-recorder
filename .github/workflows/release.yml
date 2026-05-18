@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# NOTE: the GitHub repo IS the `app/` workspace (no nested `app/` subdir).
+# So every step runs at the checkout root — no `working-directory: app`.
+
 jobs:
   release-windows:
     name: Build Windows release artifacts
@@ -23,11 +26,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release (CPU only)
-        working-directory: app
         run: cargo build --workspace --release
 
       - name: Verify binary size
-        working-directory: app
         shell: pwsh
         run: |
           $size = (Get-Item target\release\vong.exe).Length
@@ -37,24 +38,22 @@ jobs:
         run: cargo install cargo-wix --locked
 
       - name: Install WiX Toolset
-        run: choco install wixtoolset --confirm
+        run: choco install wixtoolset --confirm --no-progress
 
       - name: Initialize WiX config (first run)
-        working-directory: app
+        shell: pwsh
         run: |
           if (-not (Test-Path wix\main.wxs)) {
-            cargo wix init
+            cargo wix init --force
           }
 
       - name: Build MSI installer
-        working-directory: app
         run: cargo wix --no-build --nocapture
 
       - name: List release artifacts
-        working-directory: app
         shell: pwsh
         run: |
-          Get-ChildItem target\wix -Filter "*.msi" | ForEach-Object {
+          Get-ChildItem target\wix -Filter "*.msi" -ErrorAction SilentlyContinue | ForEach-Object {
             Write-Output "$($_.Name) — $([math]::Round($_.Length/1MB,1)) MB"
           }
 
@@ -63,8 +62,8 @@ jobs:
         with:
           name: vong-windows-release
           path: |
-            app/target/release/vong.exe
-            app/target/wix/*.msi
+            target/release/vong.exe
+            target/wix/*.msi
           if-no-files-found: warn
 
       - name: Attach to GitHub Release
@@ -72,8 +71,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            app/target/release/vong.exe
-            app/target/wix/*.msi
+            target/release/vong.exe
+            target/wix/*.msi
           draft: true
           prerelease: true
           generate_release_notes: true

@@ -55,7 +55,7 @@ pub use error::SttError;
 pub use events::TranscriptEvent;
 pub use reconnect::ExponentialBackoff;
 pub use soniox::SonioxProvider;
-pub use traits::{StreamOpts, StreamingTranscriber};
+pub use traits::{LiveConfigHandle, LiveSttConfig, StreamOpts, StreamingTranscriber, TargetMode};
 pub use whisper_local::{WhisperLocalProvider, DEFAULT_MODEL_FILENAME};
 
 /// Crate version.

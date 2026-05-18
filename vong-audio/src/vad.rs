@@ -53,6 +53,14 @@ pub struct VadConfig {
     pub min_duration_ms: u32,
     /// Maximum utterance duration; force-pack at this length to avoid runaway.
     pub max_duration_ms: u32,
+    /// While in the RECORDING state, emit a Partial `Utterance` snapshot
+    /// every `partial_emit_ms` of accumulated audio. Drives the real-time
+    /// "Bản gốc" column. `0` disables partials (fall back to per-utterance only).
+    ///
+    /// Default 1500 ms — empirically a good balance:
+    /// - too short (<800 ms) → snapshot clone overhead + Whisper backlog
+    /// - too long (>2500 ms) → "đến đâu hiện đến đấy" no longer feels live
+    pub partial_emit_ms: u32,
 }
 
 impl Default for VadConfig {
@@ -63,6 +71,7 @@ impl Default for VadConfig {
             pre_roll_ms: 200,        // capture "hello" first transient
             min_duration_ms: 200,    // discard <200ms blips
             max_duration_ms: 30_000, // 30s force-pack ceiling
+            partial_emit_ms: 1_500,
         }
     }
 }
@@ -80,6 +89,12 @@ pub struct VadFsm {
     detector: Detector<DefaultPredictor>,
     config: VadConfig,
     hangover_frames_max: u32,
+    /// Frames between partial-emit snapshots (derived from `partial_emit_ms`).
+    /// 0 disables partials entirely.
+    partial_emit_frames: u32,
+    /// Frame counter since last partial snapshot (only meaningful while in
+    /// Recording state).
+    frames_since_partial: u32,
     state: VadState,
     pre_roll: PreRollBuffer,
     current: Option<UtteranceBuilder>,
@@ -90,10 +105,17 @@ impl VadFsm {
     /// Construct a new FSM with the given config.
     pub fn new(config: VadConfig) -> Self {
         let hangover_frames_max = config.hangover_ms.div_ceil(VAD_FRAME_MS);
+        let partial_emit_frames = if config.partial_emit_ms == 0 {
+            0
+        } else {
+            config.partial_emit_ms.div_ceil(VAD_FRAME_MS)
+        };
         Self {
             detector: Detector::const_default(),
             pre_roll: PreRollBuffer::from_ms(config.pre_roll_ms),
             hangover_frames_max,
+            partial_emit_frames,
+            frames_since_partial: 0,
             config,
             state: VadState::Idle,
             current: None,
@@ -155,6 +177,7 @@ impl VadFsm {
                 );
                 self.current = Some(builder);
                 self.state = VadState::Recording { hangover_frames: 0 };
+                self.frames_since_partial = 0;
             }
             (VadState::Recording { hangover_frames }, true) => {
                 // Continued voice → append, reset hangover counter
@@ -162,6 +185,7 @@ impl VadFsm {
                     b.append_slice(frame);
                 }
                 *hangover_frames = 0;
+                self.frames_since_partial = self.frames_since_partial.saturating_add(1);
             }
             (VadState::Recording { hangover_frames }, false) => {
                 // Silence during recording → still record (hangover) but count
@@ -169,10 +193,34 @@ impl VadFsm {
                     b.append_slice(frame);
                 }
                 *hangover_frames += 1;
+                self.frames_since_partial = self.frames_since_partial.saturating_add(1);
 
                 if *hangover_frames >= self.hangover_frames_max {
                     self.pack(out_tx).await?;
                 }
+            }
+        }
+
+        // Emit a Partial snapshot if it's time. Runs only in Recording state;
+        // Idle / Hangover-just-packed states reset frames_since_partial = 0.
+        if let VadState::Recording { .. } = self.state {
+            if self.partial_emit_frames > 0
+                && self.frames_since_partial >= self.partial_emit_frames
+            {
+                if let Some(b) = self.current.as_ref() {
+                    let partial = b.snapshot_partial();
+                    tracing::debug!(
+                        seq = partial.seq,
+                        duration_ms = partial.duration_ms,
+                        samples = partial.sample_count(),
+                        "VAD: emit partial"
+                    );
+                    out_tx
+                        .send(partial)
+                        .await
+                        .map_err(|_| AudioError::ConsumerDropped)?;
+                }
+                self.frames_since_partial = 0;
             }
         }
 
@@ -216,6 +264,7 @@ impl VadFsm {
             }
         }
         self.state = VadState::Idle;
+        self.frames_since_partial = 0;
         Ok(())
     }
 }

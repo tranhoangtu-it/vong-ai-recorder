@@ -1,19 +1,27 @@
-// Vọng STT — Phase 0 hello window.
+// AI Translate — main window.
 //
-// This is the Phase 0 scaffold preview, NOT the production dashboard. The full
-// dashboard / floating pill / tray menu / onboarding ship Phase 5+ and live in
-// `vong-ui/ui/*.slint`. Design tokens used here mirror `docs/design.md` so the
-// preview visually matches what later phases will build.
+// Single AppWindow with sidebar + two transcript columns (Bản gốc / Bản dịch)
+// + mic record button between them. The previous floating-pill window was
+// removed — too low-signal next to the main UI.
+// Design tokens mirror `docs/design.md`.
 
 import { VerticalBox, HorizontalBox, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
 
 // Soniox-style transcript line — single utterance with timestamp + language tag.
+//
+// Carries TWO parallel renditions of the same utterance:
+//   - `original-text` / `original-lang` — auto-detected ("Bản gốc")
+//   - `text` / `lang` — language-hinted decode ("Bản phiên âm")
+// UI renders them side-by-side in TranscriptStream.
 struct TranscriptLine {
     seq: int,
-    time: string,       // "14:30"
-    lang: string,       // "vi"
-    text: string,
-    duration-ms: int,   // for confidence dimming if needed
+    time: string,             // "14:30"
+    lang: string,              // hinted/primary language, e.g. "vi"
+    text: string,              // primary text ("Bản phiên âm")
+    original-lang: string,     // auto-detected language, e.g. "en"
+    original-text: string,     // auto-detected text ("Bản gốc")
+    duration-ms: int,          // for confidence dimming if needed
+    translation-done: bool,    // true once pass B has emitted Translation
 }
 
 // ---- Design tokens (mirrored from docs/design.md §1.2) ----
@@ -64,7 +72,7 @@ component HeaderBar inherits Rectangle {
                 vertical-alignment: center;
             }
             Text {
-                text: "Vọng";
+                text: "AI Translate";
                 font-size: Tokens.font-body;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -226,7 +234,7 @@ component OnboardingBanner inherits Rectangle {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: "Chào mừng tới Vọng";
+                    text: "Chào mừng tới AI Translate";
                     font-size: Tokens.font-h2;
                     font-weight: 800;
                     color: Tokens.text-primary;
@@ -321,7 +329,7 @@ component AudioSourceCard inherits Rectangle {
         }
 
         if restart-needed: Text {
-            text: "↻  Đã lưu — khởi động lại Vọng để áp dụng";
+            text: "↻  Đã lưu — khởi động lại AI Translate để áp dụng";
             font-size: Tokens.font-caption;
             color: Tokens.danger;
             wrap: no-wrap;
@@ -427,137 +435,55 @@ component HistoryCard inherits Rectangle {
     }
 }
 
-// Floating Pill — borderless always-on-top overlay shown alongside main window
-// during recording. Compact view of live state for distraction-free monitoring.
-//
-// Sized per docs/design.md §3 S2 (360×140 — slightly taller than spec to fit
-// the live-transcript line at body font without elide).
-export component FloatingPill inherits Window {
-    title: "Vọng — Live";
-    width: 360px;
-    height: 140px;
-    background: transparent;
-    no-frame: true;
-    always-on-top: true;
-    default-font-size: Tokens.font-secondary;
+// Round record button — toggles between "tap to record" (gray mic) and
+// "recording" (red filled dot pulsing). Sits in a fixed-width column between
+// the two transcript panels per user request "ở giữa 2 cột".
+component RecordButton inherits Rectangle {
+    in property <bool> active;
+    callback toggled(bool);
 
-    in property <float> peak-level: 0.0;
-    in property <string> last-transcript: "";
-    in property <int> utterance-count: 0;
-    in property <int> elapsed-seconds: 0;
-    in property <string> language-tag: "vi";
-    callback close-requested();
+    width: 64px;
+    height: 64px;
 
-    Rectangle {
-        background: Tokens.surface;
-        border-radius: 12px;
-        border-width: 1px;
-        border-color: Tokens.border;
-        // Subtle drop shadow via offset child
-        drop-shadow-blur: 16px;
-        drop-shadow-color: #00000060;
-        drop-shadow-offset-y: 2px;
-
-        VerticalBox {
-            padding: 12px;
-            spacing: 8px;
-
-            // Header — recording dot, timer, language, utterance count, close button
-            HorizontalBox {
-                spacing: 8px;
-                alignment: space-between;
-
-                HorizontalBox {
-                    spacing: 8px;
-                    alignment: start;
-                    Rectangle {
-                        width: 10px;
-                        height: 10px;
-                        border-radius: 5px;
-                        background: Tokens.danger;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    Text {
-                        text: timer-format(elapsed-seconds);
-                        font-size: Tokens.font-secondary;
-                        font-weight: 600;
-                        color: Tokens.text-primary;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: "·  " + language-tag;
-                        font-size: Tokens.font-caption;
-                        color: Tokens.text-hint;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: "·  " + utterance-count + " utt";
-                        font-size: Tokens.font-caption;
-                        color: Tokens.text-hint;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Close indicator (clicking quits app — Slint default for close window)
-                close-touch := TouchArea {
-                    width: 18px;
-                    height: 18px;
-                    clicked => { root.close-requested(); }
-                    Text {
-                        text: "✕";
-                        font-size: 14px;
-                        color: close-touch.has-hover ? Tokens.text-primary : Tokens.text-hint;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            // Live transcript line (single line, elide if too long)
-            Text {
-                text: last-transcript == "" ? "Hãy nói…" : last-transcript;
-                font-size: Tokens.font-body;
-                color: last-transcript == "" ? Tokens.text-hint : Tokens.text-primary;
-                wrap: no-wrap;
-                overflow: elide;
-            }
-
-            // Mini peak meter
-            Rectangle {
-                height: 4px;
-                background: #1f1f1f;
-                border-radius: 2px;
-                border-width: 1px;
-                border-color: Tokens.border;
-                clip: true;
-
-                Rectangle {
-                    x: 0;
-                    y: 0;
-                    width: parent.width * peak-level;
-                    height: parent.height;
-                    border-radius: 2px;
-                    background: peak-level > 0.9 ? Tokens.danger
-                              : peak-level > 0.7 ? #FBBF24
-                              : Tokens.success;
-                    animate width { duration: 80ms; easing: ease-out; }
-                }
-            }
+    touch := TouchArea {
+        clicked => {
+            root.toggled(!root.active);
         }
     }
 
-    // mm:ss formatter — pure Slint expression (no Rust callback needed)
-    pure function timer-format(seconds: int) -> string {
-        Math.floor(seconds / 60) + ":" + (Math.mod(seconds, 60) < 10 ? "0" : "") + Math.mod(seconds, 60)
+    // Outer ring — color reflects state
+    Rectangle {
+        width: 64px;
+        height: 64px;
+        border-radius: 32px;
+        background: root.active
+            ? (touch.has-hover ? #ef4444 : #dc2626)
+            : (touch.has-hover ? #404040 : #262626);
+        border-width: 2px;
+        border-color: root.active ? #fca5a5 : Tokens.border;
+        animate background { duration: 150ms; }
+        animate border-color { duration: 150ms; }
+
+        // Inner dot when recording (small red dot) or mic glyph when idle
+        Text {
+            text: root.active ? "⏺" : "🎙";
+            font-size: 24px;
+            color: white;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 }
 
-// Soniox-style scrolling transcript stream — list of utterance lines with
-// timestamps + language tag + body text. Auto-scrolls to bottom on new line
-// (Slint ScrollView preserves scroll position; new lines append so user
-// sees latest at bottom).
-component TranscriptStream inherits Rectangle {
-    in property <[TranscriptLine]> lines;
+// Language picker card for the sidebar. Two ComboBoxes side by side.
+// Source = "Bản gốc" language hint for Pass A. Target = mode for Pass B.
+component LanguagePickerCard inherits Rectangle {
+    in property <[string]> source-options;
+    in property <string> current-source;
+    in property <[string]> target-options;
+    in property <string> current-target;
+    callback source-changed(string);
+    callback target-changed(string);
 
     background: Tokens.surface;
     border-radius: 8px;
@@ -575,11 +501,11 @@ component TranscriptStream inherits Rectangle {
                 width: 8px;
                 height: 8px;
                 border-radius: 4px;
-                background: Tokens.danger;  // red = recording (Soniox pattern)
+                background: Tokens.accent;
                 y: (parent.height - self.height) / 2;
             }
             Text {
-                text: "Bản phiên âm trực tiếp  ·  " + lines.length + " dòng";
+                text: "Ngôn ngữ";
                 font-size: Tokens.font-secondary;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -587,12 +513,85 @@ component TranscriptStream inherits Rectangle {
             }
         }
 
-        // Scrollable list area. Slint ScrollView expands inside parent flex.
+        Text {
+            text: "Bản gốc (nguồn):";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+        }
+        ComboBox {
+            model: source-options;
+            current-value: current-source;
+            selected(value) => {
+                root.source-changed(value);
+            }
+        }
+
+        Text {
+            text: "Bản dịch (đích):";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+        }
+        ComboBox {
+            model: target-options;
+            current-value: current-target;
+            selected(value) => {
+                root.target-changed(value);
+            }
+        }
+    }
+}
+
+// Single-column scrolling transcript panel. Used twice in AppWindow body:
+// once for "Bản gốc" (use-original = true) and once for "Bản phiên âm"
+// (use-original = false). Each instance owns its own ScrollView so the
+// two panels scroll independently.
+//
+// Pass A (Whisper auto-detect) populates `original-text` / `original-lang`
+// immediately when an utterance is decoded. Pass B (with language hint)
+// fills `text` / `lang` later — when text is empty the right panel shows
+// a "đang dịch…" placeholder so users see translation work in flight.
+component TranscriptColumn inherits Rectangle {
+    in property <[TranscriptLine]> lines;
+    in property <string> title;
+    in property <bool> use-original;
+    in property <color> accent-color: Tokens.accent;
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        // Header — colored dot + title + line counter
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: accent-color;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: title + "  ·  " + lines.length + " dòng";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        // Scrollable list. min-height keeps empty state visible.
         ScrollView {
             min-height: 200px;
             VerticalLayout {
                 spacing: 4px;
                 alignment: lines.length == 0 ? center : start;
+
                 if lines.length == 0: VerticalLayout {
                     alignment: center;
                     spacing: 12px;
@@ -610,36 +609,65 @@ component TranscriptStream inherits Rectangle {
                         horizontal-alignment: center;
                     }
                     Text {
-                        text: "Mỗi câu được VAD đóng gói sẽ xuất hiện ở đây\nvới timestamp + ngôn ngữ phát hiện.";
+                        text: use-original
+                            ? "Whisper auto-detect sẽ điền cột này ngay\nkhi mỗi utterance được nhận diện."
+                            : "Whisper với gợi ý tiếng Việt điền cột này\nsau khi pass đầu hoàn tất.";
                         font-size: Tokens.font-caption;
                         color: Tokens.text-hint;
                         horizontal-alignment: center;
                         wrap: word-wrap;
                     }
                 }
+
                 for line in lines: HorizontalBox {
-                    spacing: 12px;
+                    spacing: 10px;
                     alignment: start;
                     padding: 4px;
+
+                    // Time gutter
                     Text {
                         text: line.time;
                         font-size: Tokens.font-caption;
                         color: Tokens.text-hint;
                         vertical-alignment: top;
-                        width: 56px;
+                        width: 48px;
                     }
+
+                    // Language badge — for translation column, blank until pass B
+                    // labels it so we don't show a stale "vi" before result arrives.
                     Text {
-                        text: line.lang;
+                        text: use-original
+                            ? (line.original-lang == "" ? "?" : line.original-lang)
+                            : (line.translation-done
+                                ? (line.lang == "" ? "?" : line.lang)
+                                : "…");
                         font-size: Tokens.font-caption;
-                        color: Tokens.accent;
+                        color: accent-color;
                         font-weight: 600;
                         vertical-alignment: top;
                         width: 28px;
                     }
+
+                    // Main text — wraps to fill remaining width.
+                    //
+                    // Translation column placeholder logic:
+                    //   - !translation-done → "⏳  đang dịch…"  (pass B in flight)
+                    //   - translation-done && text == ""   → "(không có)"  (pass B done, empty)
+                    //   - translation-done && text != ""   → text          (normal)
+                    //
+                    // Original column placeholder logic:
+                    //   - original-text == "" → "(im lặng)"
+                    //   - otherwise          → original-text
                     Text {
-                        text: line.text == "" ? "(silence)" : line.text;
+                        text: use-original
+                            ? (line.original-text == "" ? "(im lặng)" : line.original-text)
+                            : (line.translation-done
+                                ? (line.text == "" ? "(không có)" : line.text)
+                                : "⏳  đang dịch…");
                         font-size: Tokens.font-secondary;
-                        color: line.text == "" ? Tokens.text-hint : Tokens.text-primary;
+                        color: use-original
+                            ? (line.original-text == "" ? Tokens.text-hint : Tokens.text-primary)
+                            : (line.translation-done && line.text != "" ? Tokens.text-primary : Tokens.text-hint);
                         wrap: word-wrap;
                         horizontal-stretch: 1;
                     }
@@ -649,60 +677,8 @@ component TranscriptStream inherits Rectangle {
     }
 }
 
-// Transcript display — shows latest Whisper Final text, or a hint when empty,
-// plus a footer line indicating SQLite persistence status.
-component TranscriptCard inherits Rectangle {
-    in property <string> text;
-    in property <string> storage;
-
-    background: Tokens.surface;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Tokens.border;
-
-    VerticalBox {
-        padding: 16px;
-        spacing: 6px;
-
-        HorizontalBox {
-            spacing: 8px;
-            alignment: start;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: Tokens.accent;
-                y: (parent.height - self.height) / 2;
-            }
-            Text {
-                text: "Bản phiên âm gần nhất";
-                font-size: Tokens.font-secondary;
-                font-weight: 600;
-                color: Tokens.text-primary;
-                vertical-alignment: center;
-            }
-        }
-
-        Text {
-            text: text == "" ? "Hãy nói gì đó — Whisper Base sẽ xử lý mỗi utterance VAD đóng gói…" : text;
-            font-size: Tokens.font-body;
-            color: text == "" ? Tokens.text-hint : Tokens.text-primary;
-            wrap: word-wrap;
-            horizontal-alignment: left;
-        }
-
-        Text {
-            text: storage;
-            font-size: Tokens.font-caption;
-            color: Tokens.text-hint;
-            wrap: no-wrap;
-            overflow: elide;
-        }
-    }
-}
-
 export component AppWindow inherits Window {
-    title: "Vọng";
+    title: "AI Translate";
     // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
     width: 1280px;
     height: 800px;
@@ -739,6 +715,19 @@ export component AppWindow inherits Window {
     in property <string> export-status: "";
     callback export-clicked();
 
+    // Record toggle — default OFF until user clicks. Set in-out so the
+    // button click can flip local state immediately while also notifying Rust.
+    in-out property <bool> recording: false;
+    callback record-toggled(bool);
+
+    // Language pickers — Source (Bản gốc) + Target mode (Bản dịch)
+    in property <[string]> source-language-options;
+    in property <string> current-source-language;
+    callback source-language-changed(string);
+    in property <[string]> target-mode-options;
+    in property <string> current-target-mode;
+    callback target-mode-changed(string);
+
     // ──── Soniox-inspired layout ─────────────────────────────────────
     //   Header bar (compact)
     //   ┌─────────────┬──────────────────────────────────────────────┐
@@ -754,7 +743,7 @@ export component AppWindow inherits Window {
     //
     // Hero block + Phase 0 status card removed — Soniox dashboards prioritize
     // the transcript over branding chrome. App branding stays in HeaderBar
-    // (logo + "Vọng" text) and footer ("vong.app · Privacy-first · BYOK").
+    // (logo + "AI Translate" text) and footer ("ai-translate · Privacy-first · BYOK").
     VerticalBox {
         padding: 0px;
         spacing: 0px;
@@ -802,6 +791,19 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        LanguagePickerCard {
+                            source-options: source-language-options;
+                            current-source: current-source-language;
+                            target-options: target-mode-options;
+                            current-target: current-target-mode;
+                            source-changed(v) => {
+                                root.source-language-changed(v);
+                            }
+                            target-changed(v) => {
+                                root.target-mode-changed(v);
+                            }
+                        }
+
                         HistoryCard {
                             text: history-status;
                             search-changed(q) => {
@@ -819,15 +821,68 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Main content — transcript-first
+            // Main content — two equal-width transcript panels (50/50) above
+            // a single peak meter strip. Both panels share the same `lines`
+            // model; one renders the auto-detect ("Bản gốc") fields, the other
+            // renders the language-hinted ("Bản phiên âm") fields.
             VerticalBox {
                 padding: 16px;
                 spacing: 10px;
                 horizontal-stretch: 1;
 
-                TranscriptStream {
-                    lines: transcript-lines;
+                HorizontalBox {
+                    spacing: 10px;
+                    padding: 0px;
                     vertical-stretch: 1;
+
+                    TranscriptColumn {
+                        lines: transcript-lines;
+                        title: "Bản gốc";
+                        use-original: true;
+                        accent-color: #4ADE80; // success green — real-time / first
+                        horizontal-stretch: 1;
+                    }
+
+                    // Mic button column — vertically centered between the
+                    // two transcript panels, fixed width so it doesn't squeeze
+                    // the panels. User taps to start/stop recording.
+                    VerticalLayout {
+                        width: 84px;
+                        alignment: center;
+                        spacing: 8px;
+
+                        Rectangle {
+                            width: 100%;
+                            horizontal-stretch: 0;
+                            height: 64px;
+                            background: transparent;
+                            HorizontalLayout {
+                                alignment: center;
+                                RecordButton {
+                                    active: recording;
+                                    toggled(on) => {
+                                        root.recording = on;
+                                        root.record-toggled(on);
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            text: recording ? "Đang ghi…" : "Nhấn để ghi";
+                            font-size: Tokens.font-caption;
+                            color: recording ? Tokens.danger : Tokens.text-hint;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    TranscriptColumn {
+                        lines: transcript-lines;
+                        title: "Bản dịch";
+                        use-original: false;
+                        accent-color: Tokens.accent; // violet — translated
+                        horizontal-stretch: 1;
+                    }
                 }
 
                 PeakMeter {
@@ -836,14 +891,6 @@ export component AppWindow inherits Window {
                     footer: pipeline-status;
                 }
             }
-        }
-
-        // Hidden placeholder kept so original `last-transcript` property still
-        // has a consumer (the FloatingPill mirrors it). No visible card now —
-        // primary surface for transcripts is `TranscriptStream` above.
-        if false: TranscriptCard {
-            text: last-transcript;
-            storage: storage-status;
         }
 
         // Footer
@@ -864,7 +911,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "vong.app";
+                    text: "ai-translate";
                     font-size: Tokens.font-caption;
                     color: Tokens.text-hint;
                     vertical-alignment: center;

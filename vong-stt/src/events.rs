@@ -30,13 +30,28 @@ pub enum TranscriptEvent {
     },
 
     /// Final committed token — text won't change for this segment.
+    ///
+    /// Carries two parallel renditions of the same utterance:
+    /// - `text` / `language` — produced with the user-selected language hint
+    ///   (e.g., `vi`). This is the "bản phiên âm" surfaced as the primary stream.
+    /// - `original_text` / `original_language` — produced with no language hint,
+    ///   letting Whisper auto-detect. This is the "bản gốc" — preserves the
+    ///   source language when the speaker is using something other than Vietnamese.
+    ///
+    /// Providers that don't run a second pass (e.g., Soniox) may leave the
+    /// `original_*` fields equal to the primary ones, or `None`/empty for
+    /// `original_language`.
     Final {
         /// Sequential token index.
         seq: u64,
-        /// Token text.
+        /// Primary token text (language-hinted pass).
         text: String,
-        /// Detected language tag.
+        /// Hinted/detected language tag for `text`.
         language: Option<String>,
+        /// Original-language text (auto-detect pass). Empty if not produced.
+        original_text: String,
+        /// Auto-detected language tag for `original_text`. `None` if unavailable.
+        original_language: Option<String>,
         /// Speaker label if diarization enabled (e.g., "spk-1"). MVP 0.1: always None.
         speaker: Option<String>,
         /// Segment start time relative to session start.

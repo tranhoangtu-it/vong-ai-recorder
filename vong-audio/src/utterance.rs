@@ -9,16 +9,24 @@ use uuid::Uuid;
 
 use crate::types::TARGET_SAMPLE_RATE_HZ;
 
-/// A complete voice-bounded audio segment ready for STT processing.
+/// A voice-bounded audio segment ready for STT processing.
 ///
 /// Payload is 16 kHz mono PCM16 (matches STT provider expectations,
 /// see plan v2 Section 4.1).
+///
+/// Two flavors:
+/// - **Final** (`is_partial = false`) — VAD has packed the complete utterance
+///   after hangover or max-duration. Suitable for translation + DB persist.
+/// - **Partial** (`is_partial = true`) — snapshot mid-utterance for real-time
+///   "Bản gốc" UI feedback. Same `seq` as the eventual final, identified by
+///   the flag. Should run only fast inference (no translation pass, no persist).
 #[derive(Debug, Clone)]
 pub struct Utterance {
-    /// Stable unique identifier (UUID v4).
+    /// Stable unique identifier (UUID v4) — fresh per snapshot.
     pub id: Uuid,
 
-    /// Monotonic sequence number within the recording session.
+    /// Monotonic sequence number within the recording session. Partials and
+    /// the final for the same speech segment share the same `seq`.
     pub seq: u64,
 
     /// Recording wall-clock start time.
@@ -29,6 +37,10 @@ pub struct Utterance {
 
     /// 16 kHz mono PCM16 samples. Includes pre-roll (~200ms) + speech + hangover.
     pub audio_pcm16_mono_16k: Vec<i16>,
+
+    /// True for periodic mid-speech snapshots. Consumers use this to decide
+    /// fast-only vs full inference.
+    pub is_partial: bool,
 }
 
 impl Utterance {
@@ -70,7 +82,8 @@ impl UtteranceBuilder {
         self.samples.len()
     }
 
-    /// Finalize the builder into an immutable `Utterance`.
+    /// Finalize the builder into an immutable Final `Utterance`. Consumes
+    /// the builder.
     pub fn build(self) -> Utterance {
         let duration_ms =
             ((self.samples.len() as u64 * 1000) / TARGET_SAMPLE_RATE_HZ as u64) as u32;
@@ -80,6 +93,28 @@ impl UtteranceBuilder {
             started_at: self.started_at,
             duration_ms,
             audio_pcm16_mono_16k: self.samples,
+            is_partial: false,
+        }
+    }
+
+    /// Snapshot the in-progress audio as a Partial `Utterance` without
+    /// consuming the builder. Used by VAD to push periodic real-time updates
+    /// while still accumulating new frames for the eventual Final.
+    ///
+    /// Cost: clones the current `samples` Vec. At 16 kHz mono i16 a few seconds
+    /// of speech is ~32 KB per clone — well under the 5 ms audio-callback
+    /// budget. Don't lower the partial-emit interval to single-frame frequency
+    /// or this becomes a hot spot.
+    pub fn snapshot_partial(&self) -> Utterance {
+        let duration_ms =
+            ((self.samples.len() as u64 * 1000) / TARGET_SAMPLE_RATE_HZ as u64) as u32;
+        Utterance {
+            id: Uuid::new_v4(),
+            seq: self.seq,
+            started_at: self.started_at,
+            duration_ms,
+            audio_pcm16_mono_16k: self.samples.clone(),
+            is_partial: true,
         }
     }
 }

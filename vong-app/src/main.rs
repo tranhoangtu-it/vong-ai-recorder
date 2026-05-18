@@ -12,7 +12,6 @@ mod tray;
 
 use cpal::traits::DeviceTrait;
 use rtrb::RingBuffer;
-use slint::Model;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -29,7 +28,10 @@ use vong_storage::{
     list_recent_sessions, open_default, search_transcripts, Connection, NewSegment, NewSession,
     SearchHit, Session,
 };
-use vong_stt::{StreamOpts, StreamingTranscriber, TranscriptEvent, WhisperLocalProvider};
+use vong_stt::{
+    LiveConfigHandle, StreamOpts, StreamingTranscriber, TargetMode, TranscriptEvent,
+    WhisperLocalProvider,
+};
 
 slint::include_modules!();
 
@@ -95,17 +97,40 @@ struct PipelineState {
     /// Soniox-style scrolling transcript stream. Each new Final event appends
     /// a line; UI Timer copies into the Slint VecModel for rendering.
     transcript_stream: Mutex<Vec<TranscriptStreamLine>>,
+    /// Generation counter for `transcript_stream` — bumped on any mutation
+    /// (append, in-place text update). The Slint Timer compares this against
+    /// the last value it pushed and only re-renders when it changes.
+    /// Without this, the length-only check missed pass-B text updates on
+    /// existing rows.
+    transcript_stream_gen: AtomicU64,
+    /// User-controlled record toggle. When false, the relay task between
+    /// VAD and Whisper drops every utterance — Whisper receives no input
+    /// and the UI stays idle. Toggled by the mic button between the two
+    /// transcript columns. Default `false` (off until explicit click).
+    is_recording: std::sync::atomic::AtomicBool,
 }
 
 /// Local mirror of Slint's `TranscriptLine` struct for in-Rust storage.
 /// Converted to the Slint-generated struct only when pushing to the model.
+///
+/// Two parallel renditions per row:
+/// - `text` / `lang` — language-hinted Whisper pass ("Bản phiên âm")
+/// - `original_text` / `original_lang` — auto-detect Whisper pass ("Bản gốc")
+///
+/// `translation_done` distinguishes "pass B still running" (UI shows the
+/// placeholder) from "pass B finished but produced empty text" (UI shows a
+/// "no result" marker). Without this flag, an empty `text` is ambiguous and
+/// the placeholder stays forever on edge cases.
 #[derive(Debug, Clone)]
 struct TranscriptStreamLine {
     seq: i32,
     time: String,
     lang: String,
     text: String,
+    original_lang: String,
+    original_text: String,
     duration_ms: i32,
+    translation_done: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -118,6 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Audio-source picker: enumerate devices + populate dropdown.
     populate_audio_source_picker(&ui);
+
+    // Language pickers: populate dropdown models + set defaults.
+    populate_language_pickers(&ui);
 
     // First-launch onboarding banner. On dismiss, write marker file so it doesn't
     // re-appear next time. Skip the banner entirely if the file already exists.
@@ -132,20 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Floating Pill — borderless always-on-top overlay alongside main window.
-    let pill = FloatingPill::new()?;
-    {
-        let pill_weak = pill.as_weak();
-        pill.on_close_requested(move || {
-            if let Some(p) = pill_weak.upgrade() {
-                let _ = p.hide();
-                tracing::info!("pill: close requested — hiding pill");
-            }
-        });
-    }
     let app_started_at = std::time::Instant::now();
 
-    let audio = match init_audio(&ui, pill.as_weak(), app_started_at) {
+    let audio = match init_audio(&ui, app_started_at) {
         Ok(bundle) => Some(bundle),
         Err(e) => {
             let msg = format!("Microphone unavailable — {e}");
@@ -165,7 +182,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    pill.show()?;
     ui.run()?;
 
     // Finalize the session row before tearing down the runtime so end_ts/duration
@@ -196,7 +212,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn init_audio(
     ui: &AppWindow,
-    pill_weak: slint::Weak<FloatingPill>,
     app_started_at: std::time::Instant,
 ) -> Result<AudioBundle, AudioError> {
     // Shared sinks used by every audio source we ever start.
@@ -227,11 +242,15 @@ fn init_audio(
     let active_source: Rc<RefCell<Option<AudioSource>>> =
         Rc::new(RefCell::new(Some(initial_source)));
 
-    // VAD FSM → utterances.
-    let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
+    // VAD FSM emits to an INTERNAL channel. A relay task forwards into the
+    // external channel that Whisper actually consumes — gated by the
+    // `is_recording` toggle so audio doesn't reach the model when the user
+    // hasn't clicked the mic button.
+    let (utt_internal_tx, mut utt_internal_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
+    let (utt_external_tx, utt_external_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
     let vad_cfg = VadConfig::default();
     runtime.spawn(async move {
-        if let Err(e) = run_vad_fsm(audio_rx, utt_tx, vad_cfg).await {
+        if let Err(e) = run_vad_fsm(audio_rx, utt_internal_tx, vad_cfg).await {
             tracing::error!(error = ?e, "VAD FSM exited with error");
         } else {
             tracing::info!("VAD FSM exited cleanly");
@@ -239,6 +258,44 @@ fn init_audio(
     });
 
     let state = Arc::new(PipelineState::default());
+
+    // Relay: gate by `is_recording`. Drops partials too — we explicitly
+    // DON'T want stale partials from the moment recording flips on; the
+    // user expects fresh utterances only.
+    let state_for_relay = state.clone();
+    runtime.spawn(async move {
+        while let Some(utt) = utt_internal_rx.recv().await {
+            if state_for_relay.is_recording.load(Ordering::Acquire) {
+                if utt_external_tx.send(utt).await.is_err() {
+                    tracing::warn!("relay: external utt channel closed");
+                    break;
+                }
+            } else {
+                tracing::trace!(
+                    seq = utt.seq,
+                    is_partial = utt.is_partial,
+                    "relay: dropped (recording=off)"
+                );
+            }
+        }
+    });
+
+    // Rename for clarity — downstream code consumed `utt_rx`.
+    let utt_rx = utt_external_rx;
+
+    // Wire the mic-button toggle. Default OFF — `state.is_recording` starts
+    // false (AtomicBool::default), so the relay drops everything until the
+    // user explicitly clicks. The button itself owns the UI state via
+    // `in-out recording`; this callback just mirrors it into Rust.
+    {
+        let state_for_record = state.clone();
+        ui.on_record_toggled(move |on| {
+            state_for_record
+                .is_recording
+                .store(on, Ordering::Release);
+            tracing::info!(recording = on, "record button toggled");
+        });
+    }
 
     // Open SQLite + create a session row. Storage failure is non-fatal — the
     // pipeline runs without persistence (segments_persisted stays at 0).
@@ -263,6 +320,9 @@ fn init_audio(
             // here on a blocking pool thread so the first real utterance
             // hits a warm pipeline at ~0.15 s.
             let provider = Arc::new(provider);
+            // Grab the live STT config handle so the UI pickers can mutate it.
+            let live_config = provider.live_config();
+            wire_language_picker_callbacks(ui, live_config.clone());
             let warmup_provider = provider.clone();
             state
                 .whisper_warming_up
@@ -363,6 +423,9 @@ fn init_audio(
     let current_query_for_timer = current_query.clone();
     let transcript_model_for_timer = transcript_model.clone();
     let mut ticks: u32 = 0;
+    // Track last-seen generation of the transcript stream so we only push
+    // to Slint when something actually changed (append or in-place update).
+    let mut last_stream_gen: u64 = 0;
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -388,20 +451,6 @@ fn init_audio(
                 .lock()
                 .map(|s| s.clone())
                 .unwrap_or_default();
-
-            let language = state_ui
-                .last_language
-                .lock()
-                .map(|s| {
-                    if s.is_empty() {
-                        "vi".to_string()
-                    } else {
-                        s.clone()
-                    }
-                })
-                .unwrap_or_else(|_| "vi".to_string());
-
-            let elapsed = app_started_at.elapsed().as_secs() as i32;
 
             // Update main window
             if let Some(ui) = ui_weak.upgrade() {
@@ -437,26 +486,14 @@ fn init_audio(
                 }
             }
 
-            // Update floating pill (mirrors live state).
-            // During warmup, override transcript with the "starting GPU" hint
-            // so user sees something more meaningful than the silent "Hãy nói…".
-            if let Some(pill) = pill_weak.upgrade() {
-                pill.set_peak_level(level);
-                let pill_text = if warming && transcript.is_empty() {
-                    "🔥  Đang khởi động GPU…".to_string()
-                } else {
-                    transcript
-                };
-                pill.set_last_transcript(pill_text.into());
-                pill.set_utterance_count(count as i32);
-                pill.set_elapsed_seconds(elapsed);
-                pill.set_language_tag(language.into());
-            }
-
             // Sync Soniox-style transcript stream from Rust Vec → Slint VecModel.
-            // Only re-push when length differs (cheap; appending lines is common).
+            // Only re-push when the generation counter changed — covers BOTH
+            // new lines (Final event) and in-place text updates (Translation
+            // event filling pass-B text on an existing row).
+            let stream_gen = state_ui.transcript_stream_gen.load(Ordering::Acquire);
             if let Ok(stream) = state_ui.transcript_stream.lock() {
-                if stream.len() != transcript_model_for_timer.row_count() {
+                if stream_gen != last_stream_gen {
+                    last_stream_gen = stream_gen;
                     // Truncate + extend. We push all rows because Slint VecModel
                     // doesn't expose a fast "replace from N" — but ≤200 entries so
                     // this is cheap (microseconds).
@@ -467,7 +504,10 @@ fn init_audio(
                             time: l.time.clone().into(),
                             lang: l.lang.clone().into(),
                             text: l.text.clone().into(),
+                            original_lang: l.original_lang.clone().into(),
+                            original_text: l.original_text.clone().into(),
                             duration_ms: l.duration_ms,
+                            translation_done: l.translation_done,
                         })
                         .collect();
                     transcript_model_for_timer.set_vec(new_rows);
@@ -879,6 +919,101 @@ fn format_device_label(d: &DeviceInfo) -> String {
     format!("{}  {}{}", icon, d.name, suffix)
 }
 
+// ─── Language picker options ───
+//
+// Static tables mapping UI label → live-config value. The Slint ComboBox
+// shows labels and emits the selected label back; Rust looks the label up
+// to translate into `Option<String>` (source) or `TargetMode` (target).
+
+/// (label, source_language). `None` = auto-detect.
+const SOURCE_LANGUAGE_OPTIONS: &[(&str, Option<&str>)] = &[
+    ("🌐  Tự động phát hiện", None),
+    ("🇻🇳  Tiếng Việt", Some("vi")),
+    ("🇬🇧  English", Some("en")),
+    ("🇯🇵  日本語", Some("ja")),
+    ("🇰🇷  한국어", Some("ko")),
+    ("🇨🇳  中文", Some("zh")),
+    ("🇫🇷  Français", Some("fr")),
+    ("🇩🇪  Deutsch", Some("de")),
+    ("🇪🇸  Español", Some("es")),
+];
+
+/// (label, target_mode). Whisper's only true cross-lingual translation
+/// target is English — Hint variants for other languages are essentially
+/// forced transcription (good for same-source-same-target denoising,
+/// produces phonetic transliteration garbage otherwise).
+fn target_mode_options() -> Vec<(&'static str, TargetMode)> {
+    vec![
+        (
+            "🇬🇧  Dịch sang English (translate)",
+            TargetMode::TranslateToEnglish,
+        ),
+        (
+            "🇻🇳  Phiên âm tiếng Việt (hint)",
+            TargetMode::Hint("vi".into()),
+        ),
+        ("🇯🇵  Phiên âm 日本語 (hint)", TargetMode::Hint("ja".into())),
+        ("🇰🇷  Phiên âm 한국어 (hint)", TargetMode::Hint("ko".into())),
+        ("🇨🇳  Phiên âm 中文 (hint)", TargetMode::Hint("zh".into())),
+        ("❌  Tắt bản dịch", TargetMode::Off),
+    ]
+}
+
+/// Populate the source-language and target-mode ComboBox models on app
+/// startup. Selects the default for each.
+fn populate_language_pickers(ui: &AppWindow) {
+    let src_labels: Vec<slint::SharedString> = SOURCE_LANGUAGE_OPTIONS
+        .iter()
+        .map(|(label, _)| (*label).into())
+        .collect();
+    ui.set_source_language_options(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+        src_labels,
+    ))));
+    // Default: first entry ("Tự động phát hiện")
+    ui.set_current_source_language(SOURCE_LANGUAGE_OPTIONS[0].0.into());
+
+    let tgt_labels: Vec<slint::SharedString> = target_mode_options()
+        .into_iter()
+        .map(|(label, _)| label.into())
+        .collect();
+    ui.set_target_mode_options(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+        tgt_labels,
+    ))));
+    // Default: first entry ("Dịch sang English (translate)")
+    ui.set_current_target_mode(target_mode_options()[0].0.into());
+}
+
+/// Wire the source/target language ComboBox callbacks to mutate
+/// `LiveSttConfig`. The next utterance Whisper processes will use the
+/// new values — no stream restart needed.
+fn wire_language_picker_callbacks(ui: &AppWindow, live_config: LiveConfigHandle) {
+    let cfg_src = live_config.clone();
+    ui.on_source_language_changed(move |label| {
+        let lookup = SOURCE_LANGUAGE_OPTIONS
+            .iter()
+            .find(|(l, _)| *l == label.as_str());
+        let new_value = lookup.and_then(|(_, code)| code.map(String::from));
+        if let Ok(mut g) = cfg_src.lock() {
+            g.source_language = new_value.clone();
+        }
+        tracing::info!(source_language = ?new_value, "source language updated");
+    });
+
+    let cfg_tgt = live_config;
+    ui.on_target_mode_changed(move |label| {
+        let modes = target_mode_options();
+        let new_mode = modes
+            .into_iter()
+            .find(|(l, _)| *l == label.as_str())
+            .map(|(_, m)| m)
+            .unwrap_or(TargetMode::TranslateToEnglish);
+        if let Ok(mut g) = cfg_tgt.lock() {
+            g.target_mode = new_mode.clone();
+        }
+        tracing::info!(target_mode = ?new_mode, "target mode updated");
+    });
+}
+
 fn populate_audio_source_picker(ui: &AppWindow) {
     let descriptors = list_all_devices().unwrap_or_default();
     tracing::info!(
@@ -1047,25 +1182,22 @@ fn spawn_whisper_pipeline(
                 TranscriptEvent::Connected => {
                     tracing::info!("STT: connected");
                 }
-                TranscriptEvent::Final {
-                    seq,
-                    text,
-                    language,
-                    start,
-                    end,
-                    ..
-                } => {
-                    state.utterance_count.fetch_add(1, Ordering::Relaxed);
-                    state.last_seq.store(seq, Ordering::Relaxed);
-                    state
-                        .last_duration_ms
-                        .store(end.as_millis() as u32, Ordering::Relaxed);
-
-                    // Skip empty Whisper output (silence / low-confidence
-                    // utterances) when refreshing the UI's last-transcript —
-                    // keeps the pill/card showing the last MEANINGFUL line
-                    // instead of blanking out. Still persist the empty segment
-                    // to keep the seq sequence intact for DB analytics.
+                TranscriptEvent::Partial { seq, text, language } => {
+                    // Streaming partial — Whisper's first pass on the in-progress
+                    // VAD buffer. We upsert the row so the "Bản gốc" column
+                    // updates in real time; "Bản phiên âm" stays in placeholder
+                    // until the Final/Translation arrive after VAD packs.
+                    upsert_line_for_seq(
+                        &state,
+                        seq,
+                        /* duration_ms */ 0,
+                        |line| {
+                            line.original_text = text.clone();
+                            line.original_lang = language
+                                .clone()
+                                .unwrap_or_else(|| "?".into());
+                        },
+                    );
                     if !text.trim().is_empty() {
                         if let Ok(mut g) = state.last_transcript.lock() {
                             *g = text.clone();
@@ -1074,40 +1206,91 @@ fn spawn_whisper_pipeline(
                             *g = language.clone().unwrap_or_default();
                         }
                     }
+                }
+                TranscriptEvent::Final {
+                    seq,
+                    text: _,
+                    language: _,
+                    original_text,
+                    original_language,
+                    end,
+                    ..
+                } => {
+                    // Pass A final — counts as one utterance + overrides any
+                    // partial-derived original_text on the existing row (or
+                    // creates the row if no partial arrived for this seq).
+                    state.utterance_count.fetch_add(1, Ordering::Relaxed);
+                    state.last_seq.store(seq, Ordering::Relaxed);
+                    state
+                        .last_duration_ms
+                        .store(end.as_millis() as u32, Ordering::Relaxed);
 
-                    // Append to Soniox-style scrolling transcript stream.
-                    // Wall-clock timestamp formatted hh:mm (24h).
-                    let wall_time = {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        // ICT is UTC+7
-                        let local = (now + 7 * 3600) % 86400;
-                        let hh = local / 3600;
-                        let mm = (local % 3600) / 60;
-                        format!("{:02}:{:02}", hh, mm)
-                    };
-                    let line = TranscriptStreamLine {
-                        seq: seq as i32,
-                        time: wall_time,
-                        lang: language.clone().unwrap_or_else(|| "?".into()),
-                        text: text.clone(),
-                        duration_ms: end.as_millis() as i32,
-                    };
-                    if let Ok(mut s) = state.transcript_stream.lock() {
-                        s.push(line);
-                        // Cap stream at 200 lines to keep UI snappy. Older lines
-                        // still in DB via `transcript_segments` table.
-                        if s.len() > 200 {
-                            let drop_n = s.len() - 200;
-                            s.drain(..drop_n);
+                    if !original_text.trim().is_empty() {
+                        if let Ok(mut g) = state.last_transcript.lock() {
+                            *g = original_text.clone();
+                        }
+                        if let Ok(mut g) = state.last_language.lock() {
+                            *g = original_language.clone().unwrap_or_default();
                         }
                     }
 
-                    // Persist segment if storage is available.
+                    upsert_line_for_seq(
+                        &state,
+                        seq,
+                        end.as_millis() as i32,
+                        |line| {
+                            line.original_text = original_text.clone();
+                            line.original_lang = original_language
+                                .clone()
+                                .unwrap_or_else(|| "?".into());
+                            line.duration_ms = end.as_millis() as i32;
+                        },
+                    );
+                }
+                TranscriptEvent::Translation {
+                    seq,
+                    text,
+                    target_lang,
+                    is_final,
+                    ..
+                } if is_final => {
+                    // Pass B done — fill in the "Bản phiên âm" cell on the
+                    // existing row. If no row exists (rare race: Translation
+                    // arrived before Final/Partial), create a placeholder one.
+                    upsert_line_for_seq(&state, seq, 0, |line| {
+                        line.text = text.clone();
+                        line.lang = if target_lang.is_empty() {
+                            "?".into()
+                        } else {
+                            target_lang.clone()
+                        };
+                        line.translation_done = true;
+                    });
+
+                    if !text.trim().is_empty() {
+                        if let Ok(mut g) = state.last_transcript.lock() {
+                            *g = text.clone();
+                        }
+                        if let Ok(mut g) = state.last_language.lock() {
+                            *g = target_lang.clone();
+                        }
+                    }
+
                     if let Some(ref ctx) = session {
-                        persist_segment(ctx, seq, start, end, &text, language.as_deref(), &state);
+                        let lang_opt = if target_lang.is_empty() {
+                            None
+                        } else {
+                            Some(target_lang.as_str())
+                        };
+                        persist_segment(
+                            ctx,
+                            seq,
+                            Duration::ZERO,
+                            Duration::ZERO,
+                            &text,
+                            lang_opt,
+                            &state,
+                        );
                     }
                 }
                 TranscriptEvent::Error { code, message } => {
@@ -1121,6 +1304,53 @@ fn spawn_whisper_pipeline(
         }
         tracing::info!("STT event consumer exited (channel closed)");
     });
+}
+
+/// Find the row for `seq` in the transcript stream and apply `f` to it;
+/// if no such row exists, push a new placeholder row and apply `f`. Bumps
+/// the generation counter so the Slint Timer re-pushes the model on next tick.
+///
+/// Caps the stream at 200 rows after any append, dropping the oldest.
+fn upsert_line_for_seq(
+    state: &PipelineState,
+    seq: u64,
+    initial_duration_ms: i32,
+    f: impl FnOnce(&mut TranscriptStreamLine),
+) {
+    let wall_time = {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // ICT (UTC+7) wall clock
+        let local = (now + 7 * 3600) % 86400;
+        let hh = local / 3600;
+        let mm = (local % 3600) / 60;
+        format!("{:02}:{:02}", hh, mm)
+    };
+    if let Ok(mut s) = state.transcript_stream.lock() {
+        if let Some(line) = s.iter_mut().rev().find(|l| l.seq == seq as i32) {
+            f(line);
+        } else {
+            let mut line = TranscriptStreamLine {
+                seq: seq as i32,
+                time: wall_time,
+                lang: String::new(),
+                text: String::new(),
+                original_lang: "?".into(),
+                original_text: String::new(),
+                duration_ms: initial_duration_ms,
+                translation_done: false,
+            };
+            f(&mut line);
+            s.push(line);
+            if s.len() > 200 {
+                let drop_n = s.len() - 200;
+                s.drain(..drop_n);
+            }
+        }
+    }
+    state.transcript_stream_gen.fetch_add(1, Ordering::Release);
 }
 
 /// Insert a `transcript_segments` row. Logs + counts on success; logs warn on

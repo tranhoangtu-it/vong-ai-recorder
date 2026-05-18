@@ -7,6 +7,7 @@
 use crate::error::SttError;
 use crate::events::TranscriptEvent;
 use async_trait::async_trait;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use vong_audio::Utterance;
 
@@ -25,6 +26,53 @@ pub struct StreamOpts {
     /// Translate to this language code (e.g., "vi", "en"). `None` = transcript only.
     pub enable_translation_to: Option<String>,
 }
+
+/// What the second Whisper pass (the "Bản dịch" column) should produce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetMode {
+    /// Don't run pass B. UI just shows "Bản gốc" populated; "Bản dịch" stays
+    /// in `translation_done=true` empty state ("(không có)").
+    Off,
+    /// Run Whisper with `set_translate(true)` — the model's only true
+    /// cross-lingual translation, target language is always English.
+    /// Use this when the user wants English subtitles for any source.
+    TranslateToEnglish,
+    /// Run Whisper with `set_language(Some(code))` and `set_translate(false)`.
+    /// Real transcription of the source forced into the named language —
+    /// gives correct text only when the input is actually that language;
+    /// produces phonetic transliteration garbage on cross-lingual input.
+    /// Useful when user wants a denoised/normalized version of the source
+    /// (e.g., source is Vietnamese → target also Vietnamese for cleanup).
+    Hint(String),
+}
+
+impl Default for TargetMode {
+    fn default() -> Self {
+        // Default — produces real English translation regardless of input
+        // language. Pre-fix default (Hint("vi")) was the source of the
+        // "khá tệ hại" complaint when speaker used English.
+        Self::TranslateToEnglish
+    }
+}
+
+/// Live STT configuration that can change between utterances.
+///
+/// Held behind `Arc<Mutex<...>>` and read by the streaming provider on every
+/// utterance — the UI can mutate this without restarting the stream.
+#[derive(Debug, Clone, Default)]
+pub struct LiveSttConfig {
+    /// Source language for "Bản gốc" (pass A). `None` = Whisper auto-detect.
+    /// When `Some("en")` the model is told upfront → faster + more accurate
+    /// than relying on the auto-detect head, at the cost of producing
+    /// gibberish if the input isn't actually that language.
+    pub source_language: Option<String>,
+
+    /// Behavior for "Bản dịch" (pass B). See `TargetMode` doc.
+    pub target_mode: TargetMode,
+}
+
+/// Convenience: handle to the shared live config.
+pub type LiveConfigHandle = Arc<Mutex<LiveSttConfig>>;
 
 /// Streaming STT provider trait.
 ///

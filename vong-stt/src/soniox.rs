@@ -336,10 +336,17 @@ fn map_token(
     }
 
     if tok.is_final {
+        // Soniox streams a single hypothesis per token — there is no separate
+        // "auto-detect" pass like Whisper local. Mirror the primary text into
+        // the original_* slots so downstream consumers always see both fields
+        // populated (UI can decide whether to render the second column when
+        // they match identically).
         TranscriptEvent::Final {
             seq: current_seq,
             text: tok.text.clone(),
             language: tok.language.clone(),
+            original_text: tok.text.clone(),
+            original_language: tok.language.clone(),
             speaker: tok.speaker.clone(),
             start: Duration::from_millis(tok.start_ms.unwrap_or(0)),
             end: Duration::from_millis(tok.end_ms.unwrap_or(0)),

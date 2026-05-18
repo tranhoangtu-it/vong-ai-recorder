@@ -131,9 +131,9 @@ component StatusCard inherits Rectangle {
     }
 }
 
-// Live audio peak meter — horizontal bar with green / yellow / red zones,
-// plus a footer line for downstream resampler progress.
-// Width is bound to `level` (0.0–1.0). Color cross-fades by threshold.
+// Compact peak meter strip — Soniox apps put this at bottom-of-main as a
+// thin status bar. Status + footer text inline; the peak bar is the
+// horizontal accent.
 component PeakMeter inherits Rectangle {
     in property <float> level: 0.0;
     in property <string> status;
@@ -143,24 +143,40 @@ component PeakMeter inherits Rectangle {
     border-radius: 8px;
     border-width: 1px;
     border-color: Tokens.border;
+    height: 88px;
 
-    VerticalBox {
-        padding: 16px;
-        spacing: 8px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
 
-        Text {
-            text: status;
-            font-size: Tokens.font-secondary;
-            color: Tokens.text-secondary;
-            wrap: no-wrap;
-            overflow: elide;
+        HorizontalBox {
+            spacing: 16px;
+            alignment: space-between;
+            Text {
+                text: status;
+                font-size: Tokens.font-secondary;
+                color: Tokens.text-primary;
+                wrap: no-wrap;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: footer;
+                font-size: Tokens.font-caption;
+                color: Tokens.text-hint;
+                wrap: no-wrap;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
         }
 
         // Track
         Rectangle {
-            height: 8px;
+            height: 6px;
             background: #1f1f1f;
-            border-radius: 4px;
+            border-radius: 3px;
             border-width: 1px;
             border-color: Tokens.border;
             clip: true;
@@ -172,21 +188,13 @@ component PeakMeter inherits Rectangle {
                 y: 0;
                 width: parent.width * level;
                 height: parent.height;
-                border-radius: 4px;
+                border-radius: 3px;
                 background: level > 0.9 ? Tokens.danger
                           : level > 0.7 ? #FBBF24
                           : Tokens.success;
                 animate width { duration: 80ms; easing: ease-out; }
                 animate background { duration: 120ms; }
             }
-        }
-
-        Text {
-            text: footer;
-            font-size: Tokens.font-caption;
-            color: Tokens.text-hint;
-            wrap: no-wrap;
-            overflow: elide;
         }
     }
 }
@@ -332,41 +340,21 @@ component ExportCard inherits Rectangle {
     border-width: 1px;
     border-color: Tokens.border;
 
-    HorizontalBox {
+    VerticalLayout {
         padding: 12px;
-        spacing: 12px;
-        alignment: space-between;
-
-        HorizontalBox {
-            spacing: 8px;
-            alignment: start;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: Tokens.success;
-                y: (parent.height - self.height) / 2;
-            }
-            Text {
-                text: status == "" ? "Xuất Markdown" : status;
-                font-size: Tokens.font-caption;
-                color: status == "" ? Tokens.text-secondary : Tokens.text-primary;
-                vertical-alignment: center;
-                wrap: no-wrap;
-                overflow: elide;
-            }
-        }
+        spacing: 6px;
 
         btn := TouchArea {
-            width: 140px;
-            height: 28px;
-            clicked => { root.export-clicked(); }
+            height: 32px;
+            clicked => {
+                root.export-clicked();
+            }
             Rectangle {
                 background: btn.has-hover ? Tokens.accent : #6d3fe0;
                 border-radius: 4px;
                 animate background { duration: 100ms; }
                 Text {
-                    text: "📥  Xuất Markdown";
+                    text: "📥  Xuất phiên mới nhất → Markdown";
                     font-size: Tokens.font-caption;
                     font-weight: 600;
                     color: white;
@@ -374,6 +362,15 @@ component ExportCard inherits Rectangle {
                     vertical-alignment: center;
                 }
             }
+        }
+
+        // Status only appears AFTER a click — gives user feedback without
+        // duplicating the button label when idle.
+        if status != "": Text {
+            text: status;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
         }
     }
 }
@@ -765,9 +762,10 @@ export component AppWindow inherits Window {
                 }
 
                 ScrollView {
-                    VerticalBox {
+                    VerticalLayout {
                         padding: 12px;
                         spacing: 10px;
+                        alignment: start; // cards size to content, no stretch fill
 
                         if onboarding-visible: OnboardingBanner {
                             dismiss => {

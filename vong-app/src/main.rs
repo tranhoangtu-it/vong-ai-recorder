@@ -29,8 +29,8 @@ use vong_storage::{
     SearchHit, Session,
 };
 use vong_stt::{
-    LiveConfigHandle, StreamOpts, StreamingTranscriber, TargetMode, TranscriptEvent,
-    WhisperLocalProvider,
+    ApiKey, LiveConfigHandle, ProviderMode, SonioxProvider, StreamOpts, StreamingTranscriber,
+    TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
 
 slint::include_modules!();
@@ -146,6 +146,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Language pickers: populate dropdown models + set defaults.
     populate_language_pickers(&ui);
+
+    // Provider picker (Whisper local / Soniox / OpenAI Realtime).
+    populate_provider_picker(&ui);
+    wire_provider_picker_callbacks(&ui);
 
     // First-launch onboarding banner. On dismiss, write marker file so it doesn't
     // re-appear next time. Skip the banner entirely if the file already exists.
@@ -301,57 +305,97 @@ fn init_audio(
     // pipeline runs without persistence (segments_persisted stays at 0).
     let session = init_storage(&device_name, state.clone());
 
-    // Try to load Whisper. If model missing, fall back to utterance-only counter.
-    let model_path = WhisperLocalProvider::resolve_default_model_path();
-    let whisper_result = WhisperLocalProvider::new(&model_path);
-    match whisper_result {
-        Ok(provider) => {
-            state
-                .whisper_loaded
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(
-                model_path = %model_path.display(),
-                "Whisper local model loaded"
-            );
+    // Decide which STT engine to drive the pipeline. Read at startup; the UI
+    // picker writes the config but a restart is required to swap providers.
+    let provider_mode = read_provider_mode();
+    tracing::info!(provider = %provider_mode.id(), "STT provider mode selected");
+    ui.set_current_provider_mode(provider_label(provider_mode).into());
+    ui.set_provider_is_cloud(provider_mode != ProviderMode::LocalWhisper);
 
-            // Share provider via Arc so a warmup task can run alongside the
-            // streaming pipeline. The first inference call on the Vulkan
-            // backend pays a ~6 s shader-pipeline init; we eat that cost
-            // here on a blocking pool thread so the first real utterance
-            // hits a warm pipeline at ~0.15 s.
-            let provider = Arc::new(provider);
-            // Grab the live STT config handle so the UI pickers can mutate it.
-            let live_config = provider.live_config();
-            wire_language_picker_callbacks(ui, live_config.clone());
-            let warmup_provider = provider.clone();
-            state
-                .whisper_warming_up
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            let state_warmup = state.clone();
-            runtime.spawn_blocking(move || {
-                if let Err(e) = warmup_provider.warmup() {
-                    tracing::warn!(error = ?e, "Whisper warmup failed (non-fatal)");
-                }
-                state_warmup
-                    .whisper_warming_up
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-            });
-
-            spawn_whisper_pipeline(
-                &runtime,
-                provider,
-                utt_rx,
-                state.clone(),
-                session.as_ref().map(SessionContext::clone_for_task),
-            );
-        }
-        Err(e) => {
+    match provider_mode {
+        ProviderMode::SonioxCloud => match ApiKey::load("soniox") {
+            Ok(key) => {
+                tracing::info!("Soniox API key loaded from keychain — using SonioxProvider");
+                state
+                    .whisper_loaded
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                let provider = Arc::new(SonioxProvider::new(key));
+                spawn_soniox_pipeline(
+                    &runtime,
+                    provider,
+                    utt_rx,
+                    state.clone(),
+                    session.as_ref().map(SessionContext::clone_for_task),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "Soniox selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
+                );
+                spawn_utterance_counter(&runtime, utt_rx, state.clone());
+            }
+        },
+        ProviderMode::OpenAIRealtime => {
             tracing::warn!(
-                error = %e,
-                model_path = %model_path.display(),
-                "Whisper unavailable — falling back to utterance counter only"
+                "OpenAI Realtime provider not yet implemented — falling back to utterance counter. Switch provider in the UI."
             );
             spawn_utterance_counter(&runtime, utt_rx, state.clone());
+        }
+        ProviderMode::LocalWhisper => {
+            // Try to load Whisper. If model missing, fall back to utterance-only counter.
+            let model_path = WhisperLocalProvider::resolve_default_model_path();
+            let whisper_result = WhisperLocalProvider::new(&model_path);
+            match whisper_result {
+                Ok(provider) => {
+                    state
+                        .whisper_loaded
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        model_path = %model_path.display(),
+                        "Whisper local model loaded"
+                    );
+
+                    // Share provider via Arc so a warmup task can run alongside the
+                    // streaming pipeline. The first inference call on the Vulkan
+                    // backend pays a ~6 s shader-pipeline init; we eat that cost
+                    // here on a blocking pool thread so the first real utterance
+                    // hits a warm pipeline at ~0.15 s.
+                    let provider = Arc::new(provider);
+                    // Grab the live STT config handle so the UI pickers can mutate it.
+                    let live_config = provider.live_config();
+                    wire_language_picker_callbacks(ui, live_config.clone());
+                    let warmup_provider = provider.clone();
+                    state
+                        .whisper_warming_up
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    let state_warmup = state.clone();
+                    runtime.spawn_blocking(move || {
+                        if let Err(e) = warmup_provider.warmup() {
+                            tracing::warn!(error = ?e, "Whisper warmup failed (non-fatal)");
+                        }
+                        state_warmup
+                            .whisper_warming_up
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
+
+                    spawn_whisper_pipeline(
+                        &runtime,
+                        provider,
+                        utt_rx,
+                        state.clone(),
+                        session.as_ref().map(SessionContext::clone_for_task),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        model_path = %model_path.display(),
+                        "Whisper unavailable — falling back to utterance counter only"
+                    );
+                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
+                }
+            }
         }
     }
 
@@ -841,6 +885,36 @@ fn mark_onboarded() -> std::io::Result<()> {
     std::fs::write(&path, format!("{}\n", timestamp))
 }
 
+// ---- Provider mode persistence (which STT engine to run) -------------------
+
+/// `%APPDATA%\Vong\Vong\config\provider.txt` — single-line provider id
+/// (`local-whisper` | `soniox` | `openai-realtime`).
+fn provider_config_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("com", "Vong", "Vong")
+        .map(|d| d.config_dir().join("provider.txt"))
+}
+
+fn read_provider_mode() -> ProviderMode {
+    if let Some(path) = provider_config_path() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(mode) = ProviderMode::from_id(content.trim()) {
+                return mode;
+            }
+        }
+    }
+    ProviderMode::default()
+}
+
+fn write_provider_mode(mode: ProviderMode) -> std::io::Result<()> {
+    let Some(path) = provider_config_path() else {
+        return Err(std::io::Error::other("ProjectDirs unavailable"));
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, mode.id())
+}
+
 // ---- Audio source picker (Phase 2-W: input + output loopback) -------------
 
 /// Persisted-source config path under `%APPDATA%\Vong\Vong\config\source.txt`.
@@ -917,6 +991,91 @@ fn format_device_label(d: &DeviceInfo) -> String {
         (DeviceKind::Input, false) => "",
     };
     format!("{}  {}{}", icon, d.name, suffix)
+}
+
+// ─── Provider picker options ───
+//
+// Labels carry an emoji prefix the Slint side parses to decide whether the
+// API-key input is visible (cloud providers only). Keep the 🧠 / ☁ prefix
+// when changing labels.
+
+fn provider_label(mode: ProviderMode) -> &'static str {
+    match mode {
+        ProviderMode::LocalWhisper => "🧠  Whisper local (offline)",
+        ProviderMode::SonioxCloud => "☁  Soniox (BYOK, word-streaming)",
+        ProviderMode::OpenAIRealtime => "☁  OpenAI Realtime (BYOK, WIP)",
+    }
+}
+
+fn parse_provider_label(s: &str) -> Option<ProviderMode> {
+    if s.contains("Whisper local") {
+        Some(ProviderMode::LocalWhisper)
+    } else if s.contains("Soniox") {
+        Some(ProviderMode::SonioxCloud)
+    } else if s.contains("OpenAI") {
+        Some(ProviderMode::OpenAIRealtime)
+    } else {
+        None
+    }
+}
+
+const PROVIDER_OPTIONS: &[ProviderMode] = &[
+    ProviderMode::LocalWhisper,
+    ProviderMode::SonioxCloud,
+    ProviderMode::OpenAIRealtime,
+];
+
+fn populate_provider_picker(ui: &AppWindow) {
+    let labels: Vec<slint::SharedString> =
+        PROVIDER_OPTIONS.iter().map(|m| provider_label(*m).into()).collect();
+    ui.set_provider_mode_options(slint::ModelRc::from(Rc::new(slint::VecModel::from(labels))));
+    let current = read_provider_mode();
+    ui.set_current_provider_mode(provider_label(current).into());
+    ui.set_provider_is_cloud(current != ProviderMode::LocalWhisper);
+}
+
+/// Wire the provider picker + API-key save button. Changing the provider
+/// writes the config file and flips `provider-restart-required` so the UI
+/// tells the user to relaunch. Saving the key calls `ApiKey::store(…)`.
+fn wire_provider_picker_callbacks(ui: &AppWindow) {
+    let initial = read_provider_mode();
+    let initial_label = provider_label(initial).to_string();
+    let ui_weak = ui.as_weak();
+    ui.on_provider_mode_changed(move |label| {
+        let Some(new_mode) = parse_provider_label(label.as_str()) else {
+            tracing::warn!(label = %label, "unknown provider label");
+            return;
+        };
+        if let Err(e) = write_provider_mode(new_mode) {
+            tracing::warn!(error = ?e, "failed to write provider config");
+        } else {
+            tracing::info!(provider = %new_mode.id(), "provider mode persisted (restart to apply)");
+        }
+        if let Some(ui) = ui_weak.upgrade() {
+            // Only flag restart-required when the new selection differs from
+            // the mode running this session.
+            ui.set_provider_restart_required(label.as_str() != initial_label.as_str());
+            // Toggle API-key field visibility based on new selection.
+            ui.set_provider_is_cloud(new_mode != ProviderMode::LocalWhisper);
+        }
+    });
+
+    ui.on_save_provider_key(move |provider_label, key| {
+        let key_str = key.to_string();
+        let Some(mode) = parse_provider_label(provider_label.as_str()) else {
+            tracing::warn!(label = %provider_label, "save key: unknown provider label");
+            return;
+        };
+        if key_str.trim().is_empty() {
+            tracing::warn!("save key: empty value — ignored");
+            return;
+        }
+        let provider_id = mode.id();
+        match ApiKey::store(provider_id, &key_str) {
+            Ok(()) => tracing::info!(provider = provider_id, "API key stored in keychain"),
+            Err(e) => tracing::warn!(provider = provider_id, error = ?e, "API key store failed"),
+        }
+    });
 }
 
 // ─── Language picker options ───
@@ -1146,8 +1305,42 @@ fn format_search_hit_line(h: &SearchHit) -> String {
     format!("  •  #{} · {} · {}", h.session_id, lang, snippet.trim())
 }
 
-/// Wire Whisper into the pipeline: spawn the STT driver + an event consumer
-/// that updates `PipelineState` and persists `Final` events into SQLite.
+/// Default `StreamOpts` used by every provider. Per-utterance source language
+/// + target mode actually come from `LiveSttConfig` (mutated by UI), but
+/// `language_hint` here seeds the live config the first time the provider
+/// runs and is also what cloud providers like Soniox use as a startup hint.
+fn default_stream_opts() -> StreamOpts {
+    StreamOpts {
+        language_hint: Some("vi".into()),
+        enable_lid: false,
+        enable_diarization: false,
+        enable_translation_to: None,
+    }
+}
+
+/// Spawn the streaming-provider driver task. Generic over any
+/// `StreamingTranscriber` implementation so we can pick between
+/// `WhisperLocalProvider`, `SonioxProvider`, and (future) OpenAI Realtime
+/// from the UI provider picker without code duplication.
+fn spawn_provider_task(
+    runtime: &tokio::runtime::Runtime,
+    provider: Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
+    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
+    event_tx: tokio::sync::mpsc::Sender<TranscriptEvent>,
+    opts: StreamOpts,
+) {
+    let provider_name = provider.name();
+    runtime.spawn(async move {
+        if let Err(e) = provider.transcribe_stream(utt_rx, event_tx, opts).await {
+            tracing::error!(provider = provider_name, error = ?e, "STT stream exited with error");
+        } else {
+            tracing::info!(provider = provider_name, "STT stream exited cleanly");
+        }
+    });
+}
+
+/// Wire the Whisper provider into the pipeline (driver task + event consumer
+/// that updates `PipelineState` and persists `Final`/`Translation` events).
 ///
 /// `provider` is `Arc` so the caller can share another reference with a parallel
 /// warmup task that pre-pays the Vulkan first-call shader-init cost.
@@ -1158,24 +1351,44 @@ fn spawn_whisper_pipeline(
     state: Arc<PipelineState>,
     session: Option<SessionContext>,
 ) {
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
+    spawn_provider_task(
+        runtime,
+        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
+        utt_rx,
+        event_tx,
+        default_stream_opts(),
+    );
+    spawn_event_consumer(runtime, event_rx, state, session);
+}
 
-    // Driver task — runs Whisper inference on each utterance.
-    let opts = StreamOpts {
-        language_hint: Some("vi".into()),
-        enable_lid: false,
-        enable_diarization: false,
-        enable_translation_to: None,
-    };
-    runtime.spawn(async move {
-        if let Err(e) = provider.transcribe_stream(utt_rx, event_tx, opts).await {
-            tracing::error!(error = ?e, "Whisper stream exited with error");
-        } else {
-            tracing::info!("Whisper stream exited cleanly");
-        }
-    });
+/// Same as `spawn_whisper_pipeline` but for the Soniox cloud provider.
+fn spawn_soniox_pipeline(
+    runtime: &tokio::runtime::Runtime,
+    provider: Arc<SonioxProvider>,
+    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
+    state: Arc<PipelineState>,
+    session: Option<SessionContext>,
+) {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
+    spawn_provider_task(
+        runtime,
+        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
+        utt_rx,
+        event_tx,
+        default_stream_opts(),
+    );
+    spawn_event_consumer(runtime, event_rx, state, session);
+}
 
-    // Event consumer task — pushes events into shared state + SQLite.
+/// Generic event consumer — handles Partial / Final / Translation / Error /
+/// Disconnected across all providers. Same semantics regardless of source.
+fn spawn_event_consumer(
+    runtime: &tokio::runtime::Runtime,
+    mut event_rx: tokio::sync::mpsc::Receiver<TranscriptEvent>,
+    state: Arc<PipelineState>,
+    session: Option<SessionContext>,
+) {
     runtime.spawn(async move {
         while let Some(evt) = event_rx.recv().await {
             match evt {

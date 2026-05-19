@@ -475,6 +475,103 @@ component RecordButton inherits Rectangle {
     }
 }
 
+// STT engine / provider picker card for the sidebar.
+//
+// Whisper local is the offline default. Cloud providers (Soniox, OpenAI
+// Realtime) give true word-by-word streaming partials but need an API key
+// stored in the OS Keychain (BYOK). The save button writes the key via
+// `ApiKey::store("<provider>", key)`. Switching provider needs a restart
+// to take effect because hot-swapping the running stream task is not
+// implemented yet.
+component ProviderCard inherits Rectangle {
+    in property <[string]> provider-options;
+    in property <string> current-provider;
+    in property <bool> show-api-key;       // true for cloud providers
+    in property <bool> restart-required;
+    in-out property <string> pending-key;
+    callback provider-changed(string);
+    callback save-key(string, string); // provider-label, key
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "STT engine";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        ComboBox {
+            model: provider-options;
+            current-value: current-provider;
+            selected(value) => {
+                root.provider-changed(value);
+            }
+        }
+
+        // Visible only for cloud providers (Soniox / OpenAI).
+        if show-api-key: VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: "API key (lưu vào Keychain):";
+                font-size: Tokens.font-caption;
+                color: Tokens.text-secondary;
+            }
+            key-edit := LineEdit {
+                placeholder-text: "paste sk-…";
+                input-type: password;
+                text <=> pending-key;
+            }
+            save-touch := TouchArea {
+                height: 28px;
+                clicked => {
+                    root.save-key(current-provider, key-edit.text);
+                    key-edit.text = "";
+                }
+                Rectangle {
+                    background: save-touch.has-hover ? Tokens.accent : #6d3fe0;
+                    border-radius: 4px;
+                    animate background { duration: 100ms; }
+                    Text {
+                        text: "💾  Lưu key";
+                        font-size: Tokens.font-caption;
+                        font-weight: 600;
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if restart-required: Text {
+            text: "↻  Khởi động lại Vọng để áp dụng provider mới";
+            font-size: Tokens.font-caption;
+            color: Tokens.danger;
+            wrap: word-wrap;
+        }
+    }
+}
+
 // Language picker card for the sidebar. Two ComboBoxes side by side.
 // Source = "Bản gốc" language hint for Pass A. Target = mode for Pass B.
 component LanguagePickerCard inherits Rectangle {
@@ -737,6 +834,15 @@ export component AppWindow inherits Window {
     in property <string> current-target-mode;
     callback target-mode-changed(string);
 
+    // Provider picker (STT engine: Local Whisper / Soniox / OpenAI)
+    in property <[string]> provider-mode-options;
+    in property <string> current-provider-mode;
+    in property <bool> provider-is-cloud: false;
+    in property <bool> provider-restart-required: false;
+    in-out property <string> pending-api-key;
+    callback provider-mode-changed(string);
+    callback save-provider-key(string, string);
+
     // ──── Soniox-inspired layout ─────────────────────────────────────
     //   Header bar (compact)
     //   ┌─────────────┬──────────────────────────────────────────────┐
@@ -797,6 +903,20 @@ export component AppWindow inherits Window {
                             restart-needed: restart-needed;
                             selected(v) => {
                                 root.audio-source-changed(v);
+                            }
+                        }
+
+                        ProviderCard {
+                            provider-options: provider-mode-options;
+                            current-provider: current-provider-mode;
+                            show-api-key: provider-is-cloud;
+                            restart-required: provider-restart-required;
+                            pending-key <=> pending-api-key;
+                            provider-changed(v) => {
+                                root.provider-mode-changed(v);
+                            }
+                            save-key(p, k) => {
+                                root.save-provider-key(p, k);
                             }
                         }
 

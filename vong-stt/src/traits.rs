@@ -27,6 +27,53 @@ pub struct StreamOpts {
     pub enable_translation_to: Option<String>,
 }
 
+/// Which STT engine drives the pipeline.
+///
+/// Selected at app startup from the persisted user config; changing it in the
+/// UI updates the config but requires a restart to take effect (hot-swap of
+/// the running stream is not supported yet — would need to tear down the
+/// active provider task and re-spawn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderMode {
+    /// Local Whisper.cpp via `WhisperLocalProvider`. Free, runs on GPU/CPU,
+    /// offline. Batches per utterance — best partial granularity ~1.5 s.
+    LocalWhisper,
+    /// Soniox WebSocket via `SonioxProvider`. BYOK ($0.003/min). True
+    /// word-level streaming partials, language ID, optional translation.
+    SonioxCloud,
+    /// OpenAI gpt-realtime via the Realtime WebSocket API. BYOK.
+    /// Provider implementation pending — selecting this returns an error
+    /// at startup until the provider lands.
+    OpenAIRealtime,
+}
+
+impl Default for ProviderMode {
+    fn default() -> Self {
+        Self::LocalWhisper
+    }
+}
+
+impl ProviderMode {
+    /// Stable string id used by config persistence + UI option labels.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::LocalWhisper => "local-whisper",
+            Self::SonioxCloud => "soniox",
+            Self::OpenAIRealtime => "openai-realtime",
+        }
+    }
+
+    /// Parse from the stable id (returns `None` on unknown).
+    pub fn from_id(s: &str) -> Option<Self> {
+        match s {
+            "local-whisper" => Some(Self::LocalWhisper),
+            "soniox" => Some(Self::SonioxCloud),
+            "openai-realtime" => Some(Self::OpenAIRealtime),
+            _ => None,
+        }
+    }
+}
+
 /// What the second Whisper pass (the "Bản dịch" column) should produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetMode {

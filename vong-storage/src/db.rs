@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 /// Open the production database at the user's platform data directory.
 ///
 /// Path:
-/// - macOS: `~/Library/Application Support/com.Vong.Vong/db.sqlite3`
-/// - Windows: `%APPDATA%\Vong\Vong\data\db.sqlite3`
-/// - Linux: `$XDG_DATA_HOME/Vong/db.sqlite3`
+/// - macOS: `~/Library/Application Support/com.Vong.Vong-AI-Recorder/db.sqlite3`
+/// - Windows: `%APPDATA%\Vong\Vong AI Recorder\data\db.sqlite3`
+/// - Linux: `$XDG_DATA_HOME/vong-ai-recorder/db.sqlite3`
 ///
 /// Creates parent directories if needed.
 pub fn open_default() -> Result<Connection, StorageError> {
@@ -53,7 +53,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), StorageError> {
 
 /// Resolve the platform-specific default DB path.
 pub fn default_db_path() -> Result<PathBuf, StorageError> {
-    let dirs = directories::ProjectDirs::from("com", "Vong", "Vong")
+    let dirs = directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder")
         .ok_or(StorageError::PathResolution)?;
     Ok(dirs.data_dir().join("db.sqlite3"))
 }

@@ -1,12 +1,14 @@
-//! Vọng Speech-to-Text providers.
+//! Vọng AI Recorder — transcription engines.
 //!
-//! Phase 4 (current): Soniox WebSocket integration (BYOK, real-time translation).
-//! Future: OpenAI gpt-realtime, Google Chirp 3, Whisper Local.
+//! Three providers behind a single `StreamingTranscriber` trait:
+//! `WhisperLocalProvider` (offline, CPU or Vulkan), `SonioxProvider`
+//! (BYOK WebSocket, true word-level partials), `OpenAIRealtimeProvider`
+//! (BYOK WebSocket, `gpt-4o-mini-transcribe` by default).
 //!
 //! # Quick start
 //!
 //! ```no_run
-//! use vong_stt::{ApiKey, SonioxProvider, StreamOpts, StreamingTranscriber};
+//! use vong_transcribe::{ApiKey, SonioxProvider, StreamOpts, StreamingTranscriber};
 //! use tokio::sync::mpsc;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {

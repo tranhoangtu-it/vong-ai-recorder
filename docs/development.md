@@ -73,7 +73,7 @@ app/
 ├── docs/                   This doc + future
 ├── vong-app/               Main binary (Slint UI entry)
 ├── vong-audio/             Phase 1-3 audio pipeline
-├── vong-stt/               Phase 4+ STT providers
+├── vong-transcribe/        Phase 4+ STT providers (Whisper local + Soniox + OpenAI Realtime)
 ├── vong-storage/           Phase 6 SQLite + FTS5
 └── vong-ui/                Phase 5+7 tray + pill + dashboard
 ```
@@ -101,7 +101,7 @@ Enable verbose: `VONG_LOG=vong=debug cargo run`
 
 ## Phase Workflow
 
-1. Read phase file (`~/.claude/plans/260517-1500-vong-stt-mvp01/phase-XX-*.md` — developer-local)
+1. Read phase file (`~/.claude/plans/260517-1500-vong-ai-recorder/phase-XX-*.md` — developer-local)
 2. Update task status: `ck plan check <phase-id> --start`
 3. Implement per Implementation Steps section
 4. Run tests + lint
@@ -182,8 +182,8 @@ In-repo:
 
 External (developer-local, NOT in this repo — paths use the developer's `~/.claude/plans/`):
 - Plan v2 design doc: `~/.claude/plans/t-p-trung-v-nghi-n-greedy-pixel.md`
-- MVP 0.1 plan: `~/.claude/plans/260517-1500-vong-stt-mvp01/plan.md`
-- Phase files: `~/.claude/plans/260517-1500-vong-stt-mvp01/phase-*.md`
+- MVP 0.1 plan: `~/.claude/plans/260517-1500-vong-ai-recorder/plan.md`
+- Phase files: `~/.claude/plans/260517-1500-vong-ai-recorder/phase-*.md`
 - Privacy Policy: `~/.claude/plans/vong-privacy-policy.md`
 - Original source spec: `../../Thiết kế ứng dụng ghi âm STT đa nền tảng.md` (parent of workspace)
 

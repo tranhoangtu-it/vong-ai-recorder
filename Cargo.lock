@@ -6431,7 +6431,7 @@ dependencies = [
  "tray-icon",
  "vong-audio",
  "vong-storage",
- "vong-stt",
+ "vong-transcribe",
  "winresource",
 ]
 
@@ -6467,7 +6467,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vong-stt"
+name = "vong-transcribe"
 version = "0.1.0-alpha.1"
 dependencies = [
  "async-trait",

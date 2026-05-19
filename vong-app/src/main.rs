@@ -37,7 +37,7 @@ use vong_storage::{
     list_recent_sessions, open_default, search_transcripts, Connection, NewSegment, NewSession,
     SearchHit, Session,
 };
-use vong_stt::{
+use vong_transcribe::{
     ApiKey, LiveConfigHandle, OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts,
     StreamingTranscriber, TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
@@ -904,7 +904,7 @@ fn sanitize_json(s: &str) -> String {
 
 /// Path to first-launch marker. Existence = user dismissed the welcome banner.
 fn onboarding_marker_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "Vong", "Vong")
+    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder")
         .map(|d| d.config_dir().join("onboarded.txt"))
 }
 
@@ -930,10 +930,10 @@ fn mark_onboarded() -> std::io::Result<()> {
 
 // ---- Provider mode persistence (which STT engine to run) -------------------
 
-/// `%APPDATA%\Vong\Vong\config\provider.txt` — single-line provider id
+/// `%APPDATA%\Vong\Vong AI Recorder\config\provider.txt` — single-line provider id
 /// (`local-whisper` | `soniox` | `openai-realtime`).
 fn provider_config_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "Vong", "Vong")
+    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder")
         .map(|d| d.config_dir().join("provider.txt"))
 }
 
@@ -960,10 +960,10 @@ fn write_provider_mode(mode: ProviderMode) -> std::io::Result<()> {
 
 // ---- Audio source picker (Phase 2-W: input + output loopback) -------------
 
-/// Persisted-source config path under `%APPDATA%\Vong\Vong\config\source.txt`.
+/// Persisted-source config path under `%APPDATA%\Vong\Vong AI Recorder\config\source.txt`.
 /// Format: a single line `<kind>|<name>` where kind ∈ {input, loopback}.
 fn audio_source_config_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "Vong", "Vong").map(|d| d.config_dir().join("source.txt"))
+    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder").map(|d| d.config_dir().join("source.txt"))
 }
 
 fn read_audio_source_config() -> Option<(String, DeviceKind)> {

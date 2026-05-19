@@ -8,8 +8,8 @@
 //!
 //! 1. Env var `VONG_WHISPER_MODEL` if set — explicit path.
 //! 2. `<exe_dir>/models/ggml-base.bin` next to the binary.
-//! 3. `<data_dir>/Vong/models/ggml-base.bin` via `directories::ProjectDirs`
-//!    (Windows: `%LOCALAPPDATA%\Vong\Vong\data\models\ggml-base.bin`).
+//! 3. `<data_dir>/models/ggml-base.bin` via `directories::ProjectDirs`
+//!    (Windows: `%LOCALAPPDATA%\Vong\Vong AI Recorder\data\models\ggml-base.bin`).
 //!
 //! Use `WhisperLocalProvider::resolve_default_model_path()` to apply the search.
 
@@ -142,7 +142,7 @@ impl WhisperLocalProvider {
         }
 
         // 3. AppData fallback. Always returns a path even if the file is missing.
-        if let Some(dirs) = ProjectDirs::from("app", "Vong", "Vong") {
+        if let Some(dirs) = ProjectDirs::from("com", "Vong", "Vong AI Recorder") {
             return dirs
                 .data_local_dir()
                 .join("models")

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "vong-app",
     "vong-audio",
-    "vong-stt",
+    "vong-transcribe",
     "vong-storage",
     "vong-ui",
 ]
@@ -15,7 +15,7 @@ rust-version = "1.78"
 license = "AGPL-3.0-only"
 authors = ["Vọng <dev@vong.app>"]
 homepage = "https://vong.app"
-repository = "https://github.com/vong-app/vong-stt-mvp01"
+repository = "https://github.com/tranhoangtu-it/vong-ai-recorder"
 
 [workspace.dependencies]
 # Async runtime
@@ -38,7 +38,7 @@ slint = "1.7"
 
 # Internal crates (path deps for workspace)
 vong-audio = { path = "vong-audio" }
-vong-stt = { path = "vong-stt" }
+vong-transcribe = { path = "vong-transcribe" }
 vong-storage = { path = "vong-storage" }
 vong-ui = { path = "vong-ui" }
 

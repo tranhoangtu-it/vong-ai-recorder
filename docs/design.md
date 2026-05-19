@@ -16,9 +16,9 @@
 | Tagline (vi) | "Cuộc họp đa ngôn ngữ. Không một câu bị bỏ sót." |
 | Tagline (en, draft) | "Every word, every language, every meeting." |
 | Domain | `vong.app` (claimed). Email handles `dev@`, `security@`, `privacy@`. |
-| Touchpoints already locked | Cargo authors `Vọng <dev@vong.app>`, binary `vong`, log namespace `vong`, Keychain service `com.vong.stt`, repo slug `vong-stt-mvp01`. |
+| Touchpoints already locked | Cargo authors `Vọng <dev@vong.app>`, binary `vong`, log namespace `vong`, Keychain service `com.vong.ai-recorder`, repo slug `vong-ai-recorder`, transcription crate `vong-transcribe`. |
 | Alternatives considered (and rejected) | `Echo` — trademark conflicts (Amazon); `Loa` — too literal "speaker"; `Tiếng` — too generic "voice"; `Phiên` — overloaded "session/translate"; `Ngân` — risks confusion with "bank"; `Vng` (no diacritic) — kills the Vietnamese identity. |
-| Risk | Diacritic in name → some build chains mangle it (CI grep, file naming). Mitigated: package name `vong-stt`, binary `vong` use ASCII; display name `Vọng` only in UI strings + Cargo `description`. |
+| Risk | Diacritic in name → some build chains mangle it (CI grep, file naming). Mitigated: package names (`vong-app`, `vong-audio`, `vong-transcribe`, `vong-storage`), binary `vong` all use ASCII; display name `Vọng` only in UI strings + Cargo `description`. |
 
 **Decision: LOCKED.** Do not re-open without explicit user trigger.
 

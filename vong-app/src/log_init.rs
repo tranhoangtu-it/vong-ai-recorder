@@ -14,9 +14,9 @@
 //! ```
 //!
 //! Log file paths:
-//! - Windows: `%APPDATA%\Vong\Vong\data\logs\vong.log.YYYY-MM-DD`
-//! - macOS:   `~/Library/Application Support/com.Vong.Vong/logs/vong.log.YYYY-MM-DD`
-//! - Linux:   `$XDG_DATA_HOME/Vong/logs/vong.log.YYYY-MM-DD`
+//! - Windows: `%APPDATA%\Vong\Vong AI Recorder\data\logs\vong.log.YYYY-MM-DD`
+//! - macOS:   `~/Library/Application Support/com.Vong.Vong-AI-Recorder/logs/vong.log.YYYY-MM-DD`
+//! - Linux:   `$XDG_DATA_HOME/vong-ai-recorder/logs/vong.log.YYYY-MM-DD`
 
 use std::path::PathBuf;
 use tracing_appender::{
@@ -28,7 +28,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 /// Resolve the production log directory. `None` if `ProjectDirs` can't resolve
 /// (very rare — only on weird hosts) — caller falls back to stderr-only.
 fn log_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "Vong", "Vong").map(|d| d.data_dir().join("logs"))
+    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder").map(|d| d.data_dir().join("logs"))
 }
 
 /// Initialize logging subscriber with env-filter + sanitization-safe defaults

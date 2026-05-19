@@ -11,13 +11,13 @@ description = "Vọng AI Recorder — desktop audio recording + multilingual tra
 name = "vong"
 path = "src/main.rs"
 
-# Opt-in features cascade from vong-stt. To build the GPU release on Windows:
+# Opt-in features cascade from vong-transcribe. To build the GPU release on Windows:
 #   $env:VULKAN_SDK = "C:\VulkanSDK\<ver>"
 #   $env:CMAKE_GENERATOR = "Ninja"          # VS 2026 MSBuild + vulkan-shaders-gen broken
 #   cargo build --release --bin vong --features vulkan
 [features]
 default = []
-vulkan = ["vong-stt/vulkan"]
+vulkan = ["vong-transcribe/vulkan"]
 
 [dependencies]
 slint = { workspace = true }
@@ -30,11 +30,11 @@ anyhow = { workspace = true }
 
 # Phase 1 + 3 + 4 + 6 wired: mic capture → VAD → Whisper local STT → SQLite storage.
 vong-audio = { workspace = true }
-vong-stt = { workspace = true }
+vong-transcribe = { workspace = true }
 vong-storage = { workspace = true }
 rtrb = "0.3"      # Ring buffer (we hold consumer side; resampler wiring comes Phase 1 proper)
 cpal = "0.17"     # For DeviceTrait::name() display in UI
-directories = "6" # Audio source preference config path (%APPDATA%\Vong\Vong\config\)
+directories = "6" # Audio source preference config path (%APPDATA%\Vong\Vong AI Recorder\config\)
 
 # Phase 5 (partial) — system tray icon + global hotkey. Cross-platform Win + Mac + Linux.
 tray-icon = "0.24"      # System tray + menu

@@ -1,14 +1,14 @@
 [package]
-name = "vong-stt"
+name = "vong-transcribe"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Vọng Speech-to-Text providers (Soniox WebSocket, future OpenAI/Google)"
+description = "Vọng transcription engines (Whisper local, Soniox WebSocket, OpenAI Realtime)"
 
 [lib]
-name = "vong_stt"
+name = "vong_transcribe"
 path = "src/lib.rs"
 
 # Opt-in features. Default keeps build CPU-only (no extra system deps).

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Vọng STT. Format follows [Keep a Changelog](https://keepachangelog.com/),
+All notable changes to Vọng AI Recorder. Format follows [Keep a Changelog](https://keepachangelog.com/),
 versioning follows [SemVer](https://semver.org/) (pre-1.0 = breaking changes possible at minor).
 
 ## [Unreleased]
@@ -35,11 +35,11 @@ locally with zero cloud dependency.
   NFC normalize. History card refreshed at ~1 Hz, FTS5 search-as-you-type,
   Markdown export to `~/Documents/Vong/session-N.md`.
 - **Phase 7** — First-launch onboarding banner with 3-feature welcome.
-  Dismiss persists to `%APPDATA%\Vong\Vong\config\onboarded.txt`.
+  Dismiss persists to `%APPDATA%\Vong\Vong AI Recorder\config\onboarded.txt`.
 
 ### Production polish
 
-- Daily-rolling crash log file at `%APPDATA%\Vong\Vong\data\logs\` via
+- Daily-rolling crash log file at `%APPDATA%\Vong\Vong AI Recorder\data\logs\` via
   `tracing-appender` 0.2. ANSI-stripped output, panic-safe, payload elided
   for privacy.
 - `tracing` metadata-only (no audio bytes, transcripts, API keys, or PII).
@@ -74,5 +74,5 @@ locally with zero cloud dependency.
   green via cross-compile sanity check but `screencapturekit` loopback
   + permission probing deferred until Windows MVP 0.1 ships.
 
-[Unreleased]: https://github.com/tranhoangtu-it/vong-stt-mvp01/compare/v0.1.0-alpha.1...HEAD
-[0.1.0-alpha.1]: https://github.com/tranhoangtu-it/vong-stt-mvp01/releases/tag/v0.1.0-alpha.1
+[Unreleased]: https://github.com/tranhoangtu-it/vong-ai-recorder/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.1]: https://github.com/tranhoangtu-it/vong-ai-recorder/releases/tag/v0.1.0-alpha.1

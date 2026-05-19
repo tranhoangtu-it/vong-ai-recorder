@@ -7,8 +7,10 @@ use crate::error::SttError;
 use keyring::Entry;
 use secrecy::{ExposeSecret, SecretString};
 
-/// Service identifier for keyring entries (macOS Keychain "service" name).
-const KEYRING_SERVICE: &str = "com.vong.stt";
+/// Service identifier for keyring entries (Windows Credential Manager /
+/// macOS Keychain "service" name). Stable across versions — changing this
+/// string orphans existing stored keys.
+const KEYRING_SERVICE: &str = "com.vong.ai-recorder";
 
 /// Opaque wrapper around an STT provider API key.
 ///
@@ -21,7 +23,7 @@ impl ApiKey {
     /// Load API key from OS Keychain for the given provider account.
     ///
     /// E.g., `ApiKey::load("soniox")` reads from
-    /// `keychain service=com.vong.stt account=soniox`.
+    /// `keychain service=com.vong.ai-recorder account=soniox`.
     pub fn load(provider: &str) -> Result<Self, SttError> {
         let entry = Entry::new(KEYRING_SERVICE, provider)
             .map_err(|e| SttError::Credential(format!("entry init: {e}")))?;
@@ -84,6 +86,6 @@ mod tests {
     fn keyring_service_constant() {
         // Sanity — ensures we don't accidentally change service name
         // (would orphan stored keys across versions).
-        assert_eq!(KEYRING_SERVICE, "com.vong.stt");
+        assert_eq!(KEYRING_SERVICE, "com.vong.ai-recorder");
     }
 }

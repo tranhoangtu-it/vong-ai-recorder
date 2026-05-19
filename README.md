@@ -1,8 +1,8 @@
-# Vọng STT
+# Vọng AI Recorder
 
 > Cuộc họp đa ngôn ngữ. Không một câu bị bỏ sót.
 
-Desktop Speech-to-Text app cho Windows 10/11 với real-time Vietnamese-first transcription, mic + speakers (loopback) capture, Whisper Base on-device (CPU/GPU), FTS5 tone-insensitive search. **Audio không bao giờ rời máy.**
+Desktop transcription app cho Windows 10/11 với real-time Vietnamese-first transcription, mic + speakers (loopback) capture, Whisper Base on-device (CPU/GPU), FTS5 tone-insensitive search. **Audio không bao giờ rời máy.**
 
 **Status**: 🟢 Phase 0-7 wired (Alpha). MVP 0.1 production-ready candidate.
 **Primary platform**: Windows 10/11. macOS scaffolding compiles but features paused.
@@ -19,7 +19,7 @@ Desktop Speech-to-Text app cho Windows 10/11 với real-time Vietnamese-first tr
 - 💊 **Floating Pill** — borderless overlay 360×140 always-on-top, live transcript + peak meter
 - 📥 **Export Markdown** — xuất phiên ghi ra `~/Documents/Vong/session-N.md`
 - 👋 **First-launch onboarding** — banner welcome dismissible, marker file persist
-- 📜 **Log rotation** — daily rolling file ở `%APPDATA%\Vong\Vong\data\logs\`
+- 📜 **Log rotation** — daily rolling file ở `%APPDATA%\Vong\Vong AI Recorder\data\logs\`
 
 ## Quick Start (Dev)
 
@@ -109,9 +109,10 @@ vong-app/      Main binary — Slint UI, tray + global hotkey, pipeline orchestr
 vong-audio/    Audio capture + resampler + VAD (Phase 1-3)
                cpal WASAPI (input + loopback) → rtrb SPSC ring → rubato sinc resampler
                → earshot VAD FSM → Utterance pack. 16 kHz mono i16 target.
-vong-stt/      Speech-to-text providers
+vong-transcribe/ Transcription providers (3 backends behind one trait)
                · WhisperLocalProvider (whisper.cpp via whisper-rs, CPU/Vulkan)
-               · SonioxProvider (WebSocket BYOK — wired but not exposed in UI yet)
+               · SonioxProvider (WebSocket BYOK — word-level partials)
+               · OpenAIRealtimeProvider (WebSocket BYOK — gpt-4o-mini-transcribe)
 vong-storage/  SQLite + FTS5 (`unicode61 remove_diacritics 2`) — sessions + segments,
                NFC normalize, search, Markdown/SRT export
 vong-ui/       Reusable Slint components (Phase 5-future — currently inlined in vong-app)
@@ -181,7 +182,7 @@ In-repo:
 - [AI agent guide (CLAUDE.md)](../CLAUDE.md) — workspace layout, invariants, code-review fixes
 
 External (developer-local, not in this repo):
-- Implementation plan + 9 phase files — `~/.claude/plans/260517-1500-vong-stt-mvp01/`
+- Implementation plan + 9 phase files — `~/.claude/plans/260517-1500-vong-ai-recorder/`
 - Design doc v2 (2,046 lines, 7 review passes) — `~/.claude/plans/t-p-trung-v-nghi-n-greedy-pixel.md`
 - Original source spec — `../Thiết kế ứng dụng ghi âm STT đa nền tảng.md` (parent of this dir)
 - Privacy Policy bilingual draft (PDPL 2026, pending lawyer review) — `~/.claude/plans/vong-privacy-policy.md`

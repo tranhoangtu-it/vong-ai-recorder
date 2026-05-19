@@ -1,4 +1,4 @@
--- Vọng STT MVP 0.1 — Initial schema
+-- Vọng AI Recorder MVP 0.1 — Initial schema
 -- Plan v2 Section 4.4 — sessions / transcript_segments / summaries
 -- Plan v2 Section 13.3.4 — FTS5 unicode61 remove_diacritics=2 for Vietnamese tone-insensitive search
 

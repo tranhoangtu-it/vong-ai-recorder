@@ -1233,41 +1233,10 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        AudioSourceCard {
-                            sources: audio-sources;
-                            current: current-audio-source;
-                            restart-needed: restart-needed;
-                            selected(v) => {
-                                root.audio-source-changed(v);
-                            }
-                        }
-
-                        ProviderCard {
-                            provider-options: provider-mode-options;
-                            current-provider: current-provider-mode;
-                            show-api-key: provider-is-cloud;
-                            restart-required: provider-restart-required;
-                            pending-key <=> pending-api-key;
-                            provider-changed(v) => {
-                                root.provider-mode-changed(v);
-                            }
-                            save-key(p, k) => {
-                                root.save-provider-key(p, k);
-                            }
-                        }
-
-                        LanguagePickerCard {
-                            source-options: source-language-options;
-                            current-source: current-source-language;
-                            target-options: target-mode-options;
-                            current-target: current-target-mode;
-                            source-changed(v) => {
-                                root.source-language-changed(v);
-                            }
-                            target-changed(v) => {
-                                root.target-mode-changed(v);
-                            }
-                        }
+                        // Audio source / Provider / Language pickers moved to
+                        // the Settings screen (⚙ Header). Sidebar here keeps
+                        // only per-session controls (history + export) plus
+                        // the first-run onboarding banner above.
 
                         HistoryCard {
                             text: history-status;

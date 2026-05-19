@@ -6455,6 +6455,7 @@ name = "vong-stt"
 version = "0.1.0-alpha.1"
 dependencies = [
  "async-trait",
+ "base64",
  "directories",
  "futures-util",
  "keyring",

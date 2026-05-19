@@ -44,6 +44,7 @@
 mod api_key;
 mod error;
 mod events;
+mod openai_realtime;
 mod reconnect;
 mod soniox;
 mod soniox_protocol;
@@ -53,6 +54,7 @@ mod whisper_local;
 pub use api_key::ApiKey;
 pub use error::SttError;
 pub use events::TranscriptEvent;
+pub use openai_realtime::OpenAIRealtimeProvider;
 pub use reconnect::ExponentialBackoff;
 pub use soniox::SonioxProvider;
 pub use traits::{

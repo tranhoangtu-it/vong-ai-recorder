@@ -29,8 +29,8 @@ use vong_storage::{
     SearchHit, Session,
 };
 use vong_stt::{
-    ApiKey, LiveConfigHandle, ProviderMode, SonioxProvider, StreamOpts, StreamingTranscriber,
-    TargetMode, TranscriptEvent, WhisperLocalProvider,
+    ApiKey, LiveConfigHandle, OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts,
+    StreamingTranscriber, TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
 
 slint::include_modules!();
@@ -336,12 +336,31 @@ fn init_audio(
                 spawn_utterance_counter(&runtime, utt_rx, state.clone());
             }
         },
-        ProviderMode::OpenAIRealtime => {
-            tracing::warn!(
-                "OpenAI Realtime provider not yet implemented — falling back to utterance counter. Switch provider in the UI."
-            );
-            spawn_utterance_counter(&runtime, utt_rx, state.clone());
-        }
+        ProviderMode::OpenAIRealtime => match ApiKey::load("openai-realtime") {
+            Ok(key) => {
+                tracing::info!(
+                    "OpenAI API key loaded from keychain — using OpenAIRealtimeProvider"
+                );
+                state
+                    .whisper_loaded
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                let provider = Arc::new(OpenAIRealtimeProvider::new(key));
+                spawn_openai_pipeline(
+                    &runtime,
+                    provider,
+                    utt_rx,
+                    state.clone(),
+                    session.as_ref().map(SessionContext::clone_for_task),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    "OpenAI Realtime selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
+                );
+                spawn_utterance_counter(&runtime, utt_rx, state.clone());
+            }
+        },
         ProviderMode::LocalWhisper => {
             // Try to load Whisper. If model missing, fall back to utterance-only counter.
             let model_path = WhisperLocalProvider::resolve_default_model_path();
@@ -1366,6 +1385,25 @@ fn spawn_whisper_pipeline(
 fn spawn_soniox_pipeline(
     runtime: &tokio::runtime::Runtime,
     provider: Arc<SonioxProvider>,
+    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
+    state: Arc<PipelineState>,
+    session: Option<SessionContext>,
+) {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
+    spawn_provider_task(
+        runtime,
+        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
+        utt_rx,
+        event_tx,
+        default_stream_opts(),
+    );
+    spawn_event_consumer(runtime, event_rx, state, session);
+}
+
+/// Same as `spawn_whisper_pipeline` but for the OpenAI Realtime cloud provider.
+fn spawn_openai_pipeline(
+    runtime: &tokio::runtime::Runtime,
+    provider: Arc<OpenAIRealtimeProvider>,
     utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
     state: Arc<PipelineState>,
     session: Option<SessionContext>,

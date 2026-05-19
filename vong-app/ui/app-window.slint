@@ -53,6 +53,10 @@ global Tokens {
 }
 
 component HeaderBar inherits Rectangle {
+    callback settings-clicked();
+    callback back-clicked();
+    in property <bool> in-settings;
+
     height: 48px;
     background: Tokens.surface;
     border-width: 0px;
@@ -66,13 +70,26 @@ component HeaderBar inherits Rectangle {
         HorizontalBox {
             spacing: 10px;
             alignment: start;
+
+            if in-settings: back-touch := TouchArea {
+                width: 32px;
+                clicked => { root.back-clicked(); }
+                Text {
+                    text: "←";
+                    font-size: 20px;
+                    color: back-touch.has-hover ? Tokens.accent : Tokens.text-primary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
             Text {
-                text: "🔊";
+                text: in-settings ? "⚙" : "🔊";
                 font-size: 18px;
                 vertical-alignment: center;
             }
             Text {
-                text: "AI Translate";
+                text: in-settings ? "Cài đặt" : "AI Translate";
                 font-size: Tokens.font-body;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -80,11 +97,29 @@ component HeaderBar inherits Rectangle {
             }
         }
 
-        Text {
-            text: "v0.1.0-alpha · Phase 0";
-            font-size: Tokens.font-caption;
-            color: Tokens.text-hint;
-            vertical-alignment: center;
+        HorizontalBox {
+            spacing: 12px;
+            alignment: end;
+
+            Text {
+                text: "v0.1.0-alpha";
+                font-size: Tokens.font-caption;
+                color: Tokens.text-hint;
+                vertical-alignment: center;
+            }
+
+            if !in-settings: gear-touch := TouchArea {
+                width: 32px;
+                height: 32px;
+                clicked => { root.settings-clicked(); }
+                Text {
+                    text: "⚙";
+                    font-size: 18px;
+                    color: gear-touch.has-hover ? Tokens.accent : Tokens.text-secondary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
 
@@ -783,6 +818,272 @@ component TranscriptColumn inherits Rectangle {
     }
 }
 
+// Single tab button in the Settings sub-sidebar. Highlights when selected.
+component SettingsTabButton inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <string> tab-id;
+    in property <string> current-tab;
+    callback selected();
+
+    height: 40px;
+    background: tab-id == current-tab
+        ? Tokens.surface-hover
+        : (touch.has-hover ? #1f1f1f : transparent);
+    border-radius: 6px;
+    animate background { duration: 100ms; }
+
+    touch := TouchArea {
+        clicked => { selected(); }
+    }
+
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+
+        Text {
+            text: icon;
+            font-size: 16px;
+            vertical-alignment: center;
+            width: 22px;
+        }
+        Text {
+            text: label;
+            font-size: Tokens.font-secondary;
+            font-weight: tab-id == current-tab ? 600 : 400;
+            color: tab-id == current-tab ? Tokens.text-primary : Tokens.text-secondary;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Generic empty-state for tabs we haven't built out yet.
+component SettingsPlaceholder inherits Rectangle {
+    in property <string> tab-name;
+    in property <string> icon;
+
+    background: transparent;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 14px;
+        Text {
+            text: icon;
+            font-size: 48px;
+            horizontal-alignment: center;
+            color: Tokens.text-hint;
+        }
+        Text {
+            text: tab-name;
+            font-size: Tokens.font-h2;
+            font-weight: 700;
+            color: Tokens.text-secondary;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Tính năng sẽ có ở bản kế tiếp.";
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-hint;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Full-screen Settings view: sub-sidebar (240 px) with 6 tabs +
+// content area on the right. The active tab string is `current-tab`;
+// the content area conditionally renders one of the tab components.
+//
+// `*-card` properties hand the existing config cards (audio source,
+// provider, language) down so the settings tabs reuse them — no
+// duplication, just relocation from the main sidebar.
+component SettingsScreen inherits Rectangle {
+    in-out property <string> current-tab;
+
+    // ─ Audio-source card props
+    in property <[string]> audio-sources;
+    in property <string> current-audio-source;
+    in property <bool> restart-needed;
+    callback audio-source-changed(string);
+
+    // ─ Provider card props
+    in property <[string]> provider-options;
+    in property <string> current-provider;
+    in property <bool> provider-is-cloud;
+    in property <bool> provider-restart-required;
+    in-out property <string> pending-api-key;
+    callback provider-changed(string);
+    callback save-provider-key(string, string);
+
+    // ─ Language card props
+    in property <[string]> source-language-options;
+    in property <string> current-source-language;
+    in property <[string]> target-mode-options;
+    in property <string> current-target-mode;
+    callback source-language-changed(string);
+    callback target-mode-changed(string);
+
+    background: Tokens.bg;
+
+    HorizontalBox {
+        spacing: 0;
+        padding: 0;
+        vertical-stretch: 1;
+
+        // ─── Tab sidebar ───
+        Rectangle {
+            width: 240px;
+            background: #0d0d0d;
+
+            Rectangle {
+                x: parent.width - 1px;
+                y: 0;
+                width: 1px;
+                height: parent.height;
+                background: Tokens.border;
+            }
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+                alignment: start;
+
+                SettingsTabButton {
+                    icon: "⚙";  label: "System";        tab-id: "system";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "system"; }
+                }
+                SettingsTabButton {
+                    icon: "⌨";  label: "Voice Typing";  tab-id: "voice-typing";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "voice-typing"; }
+                }
+                SettingsTabButton {
+                    icon: "🎙";  label: "Recording";     tab-id: "recording";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "recording"; }
+                }
+                SettingsTabButton {
+                    icon: "🌐";  label: "Language";      tab-id: "language";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "language"; }
+                }
+                SettingsTabButton {
+                    icon: "📖";  label: "Dictionary";    tab-id: "dictionary";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "dictionary"; }
+                }
+                SettingsTabButton {
+                    icon: "🔔";  label: "Notification";  tab-id: "notification";
+                    current-tab: root.current-tab;
+                    selected => { root.current-tab = "notification"; }
+                }
+            }
+        }
+
+        // ─── Content area ───
+        Rectangle {
+            background: Tokens.bg;
+            horizontal-stretch: 1;
+
+            ScrollView {
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+                    alignment: start;
+
+                    if root.current-tab == "system": VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "System";
+                            font-size: Tokens.font-h1;
+                            font-weight: 700;
+                            color: Tokens.text-primary;
+                        }
+                        Text {
+                            text: "STT engine + thông tin ứng dụng";
+                            font-size: Tokens.font-secondary;
+                            color: Tokens.text-secondary;
+                        }
+                        ProviderCard {
+                            provider-options: root.provider-options;
+                            current-provider: root.current-provider;
+                            show-api-key: root.provider-is-cloud;
+                            restart-required: root.provider-restart-required;
+                            pending-key <=> root.pending-api-key;
+                            provider-changed(v) => { root.provider-changed(v); }
+                            save-key(p, k) => { root.save-provider-key(p, k); }
+                        }
+                    }
+
+                    if root.current-tab == "voice-typing": SettingsPlaceholder {
+                        tab-name: "Voice Typing";
+                        icon: "⌨";
+                        min-height: 320px;
+                    }
+
+                    if root.current-tab == "recording": VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Recording";
+                            font-size: Tokens.font-h1;
+                            font-weight: 700;
+                            color: Tokens.text-primary;
+                        }
+                        Text {
+                            text: "Nguồn âm thanh + tham số VAD";
+                            font-size: Tokens.font-secondary;
+                            color: Tokens.text-secondary;
+                        }
+                        AudioSourceCard {
+                            sources: root.audio-sources;
+                            current: root.current-audio-source;
+                            restart-needed: root.restart-needed;
+                            selected(v) => { root.audio-source-changed(v); }
+                        }
+                    }
+
+                    if root.current-tab == "language": VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: "Language";
+                            font-size: Tokens.font-h1;
+                            font-weight: 700;
+                            color: Tokens.text-primary;
+                        }
+                        Text {
+                            text: "Ngôn ngữ nguồn (Bản gốc) + đích (Bản dịch)";
+                            font-size: Tokens.font-secondary;
+                            color: Tokens.text-secondary;
+                        }
+                        LanguagePickerCard {
+                            source-options: root.source-language-options;
+                            current-source: root.current-source-language;
+                            target-options: root.target-mode-options;
+                            current-target: root.current-target-mode;
+                            source-changed(v) => { root.source-language-changed(v); }
+                            target-changed(v) => { root.target-mode-changed(v); }
+                        }
+                    }
+
+                    if root.current-tab == "dictionary": SettingsPlaceholder {
+                        tab-name: "Dictionary";
+                        icon: "📖";
+                        min-height: 320px;
+                    }
+
+                    if root.current-tab == "notification": SettingsPlaceholder {
+                        tab-name: "Notification";
+                        icon: "🔔";
+                        min-height: 320px;
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "AI Translate";
     // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
@@ -843,6 +1144,11 @@ export component AppWindow inherits Window {
     callback provider-mode-changed(string);
     callback save-provider-key(string, string);
 
+    // View routing — "main" (transcript + sidebar) vs "settings" (full-screen
+    // Soniox-style tabbed settings). The gear icon in HeaderBar flips it.
+    in-out property <string> current-view: "main";
+    in-out property <string> current-settings-tab: "recording";
+
     // ──── Soniox-inspired layout ─────────────────────────────────────
     //   Header bar (compact)
     //   ┌─────────────┬──────────────────────────────────────────────┐
@@ -863,10 +1169,40 @@ export component AppWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        HeaderBar { }
+        HeaderBar {
+            in-settings: current-view == "settings";
+            settings-clicked => { root.current-view = "settings"; }
+            back-clicked => { root.current-view = "main"; }
+        }
 
-        // Two-column body. Sidebar left, transcript-dominated main right.
-        HorizontalBox {
+        // ─── Settings view ───
+        if current-view == "settings": SettingsScreen {
+            current-tab <=> current-settings-tab;
+            vertical-stretch: 1;
+
+            audio-sources: audio-sources;
+            current-audio-source: current-audio-source;
+            restart-needed: restart-needed;
+            audio-source-changed(v) => { root.audio-source-changed(v); }
+
+            provider-options: provider-mode-options;
+            current-provider: current-provider-mode;
+            provider-is-cloud: provider-is-cloud;
+            provider-restart-required: provider-restart-required;
+            pending-api-key <=> pending-api-key;
+            provider-changed(v) => { root.provider-mode-changed(v); }
+            save-provider-key(p, k) => { root.save-provider-key(p, k); }
+
+            source-language-options: source-language-options;
+            current-source-language: current-source-language;
+            target-mode-options: target-mode-options;
+            current-target-mode: current-target-mode;
+            source-language-changed(v) => { root.source-language-changed(v); }
+            target-mode-changed(v) => { root.target-mode-changed(v); }
+        }
+
+        // ─── Main view: two-column body. Sidebar left, transcript-dominated main right.
+        if current-view == "main": HorizontalBox {
             spacing: 0px;
             padding: 0px;
 

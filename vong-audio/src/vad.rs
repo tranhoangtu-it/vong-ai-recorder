@@ -66,11 +66,25 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.5,          // earshot recommends >0.5 as voice
-            hangover_ms: 400,        // plan v2 default; spec gốc says 300-500ms
+            // Higher threshold so ambient/noise/music isn't classified as
+            // voice — packs only when the user actually speaks. Was 0.5
+            // (earshot recommended floor); 0.65 noticeably reduces
+            // false-positive "RECORDING" when Speakers loopback is the
+            // capture source and the system is playing background audio.
+            threshold: 0.65,
+            // Shorter hangover so a natural sentence pause closes the
+            // utterance and pack-fires quickly. Was 400 ms; 200 ms still
+            // catches the tail of plosive sounds while feeling snappy.
+            hangover_ms: 200,
             pre_roll_ms: 200,        // capture "hello" first transient
             min_duration_ms: 200,    // discard <200ms blips
-            max_duration_ms: 30_000, // 30s force-pack ceiling
+            // Hard ceiling lowered from 30 s → 8 s. On noisy loopback the
+            // FSM can stay in RECORDING for the full ceiling without
+            // detecting a clean silence; capping at 8 s means UI sees a
+            // Final pack within ~8 s in the worst case, instead of waiting
+            // half a minute. Long sentences split into multiple utterances
+            // is an acceptable trade-off for real-time UX.
+            max_duration_ms: 8_000,
             partial_emit_ms: 1_500,
         }
     }
@@ -309,8 +323,8 @@ mod tests {
     fn fsm_construction() {
         let fsm = VadFsm::new(VadConfig::default());
         assert_eq!(fsm.seq, 0);
-        // Hangover frames at default 400ms / 16ms = 25
-        assert_eq!(fsm.hangover_frames_max, 25);
+        // Hangover frames at default 200ms / 16ms = 12.5 → ceil 13
+        assert_eq!(fsm.hangover_frames_max, 13);
     }
 
     #[tokio::test(flavor = "current_thread")]

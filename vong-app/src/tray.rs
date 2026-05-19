@@ -44,7 +44,7 @@ pub fn init(ui: &AppWindow) -> Result<TrayBundle, Box<dyn std::error::Error>> {
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("Vọng STT — đang lắng nghe")
+        .with_tooltip("Vọng AI Recorder — đang lắng nghe")
         .with_icon(make_violet_icon(16))
         .build()?;
 

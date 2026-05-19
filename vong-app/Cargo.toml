@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Vọng STT — desktop audio recording + multilingual transcription"
+description = "Vọng AI Recorder — desktop audio recording + multilingual transcription"
 
 [[bin]]
 name = "vong"
@@ -46,3 +46,10 @@ muda = "0.19"           # Menu items used by tray-icon
 
 [build-dependencies]
 slint-build = "1.7"
+
+# Embed the multi-size ICO (assets/icon.ico) into the Windows exe's PE
+# resource section so File Explorer / taskbar / Alt-Tab shows the branded
+# icon. `winresource` is the maintained fork of `winres` and works with
+# modern toolchains (Rust 1.78+, MSVC 2022/2026).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

@@ -1,4 +1,4 @@
-// AI Translate — main window.
+// Vọng AI Recorder — main window.
 //
 // Single AppWindow with sidebar + two transcript columns (Bản gốc / Bản dịch)
 // + mic record button between them. The previous floating-pill window was
@@ -89,7 +89,7 @@ component HeaderBar inherits Rectangle {
                 vertical-alignment: center;
             }
             Text {
-                text: in-settings ? "Cài đặt" : "AI Translate";
+                text: in-settings ? "Cài đặt" : "Vọng AI Recorder";
                 font-size: Tokens.font-body;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -269,7 +269,7 @@ component OnboardingBanner inherits Rectangle {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: "Chào mừng tới AI Translate";
+                    text: "Chào mừng tới Vọng AI Recorder";
                     font-size: Tokens.font-h2;
                     font-weight: 800;
                     color: Tokens.text-primary;
@@ -364,7 +364,7 @@ component AudioSourceCard inherits Rectangle {
         }
 
         if restart-needed: Text {
-            text: "↻  Đã lưu — khởi động lại AI Translate để áp dụng";
+            text: "↻  Đã lưu — khởi động lại Vọng AI Recorder để áp dụng";
             font-size: Tokens.font-caption;
             color: Tokens.danger;
             wrap: no-wrap;
@@ -1015,6 +1015,59 @@ component SettingsScreen inherits Rectangle {
                             provider-changed(v) => { root.provider-changed(v); }
                             save-key(p, k) => { root.save-provider-key(p, k); }
                         }
+
+                        // About card — version + tech stack + license
+                        Rectangle {
+                            background: Tokens.surface;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Tokens.border;
+
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 8px;
+
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: Tokens.accent;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                    Text {
+                                        text: "About Vọng AI Recorder";
+                                        font-size: Tokens.font-secondary;
+                                        font-weight: 600;
+                                        color: Tokens.text-primary;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Version: 0.1.0-alpha.1";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-secondary;
+                                }
+                                Text {
+                                    text: "Built with Rust · Slint · whisper.cpp · Vulkan · cpal";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-secondary;
+                                }
+                                Text {
+                                    text: "License: AGPL-3.0-only · Privacy-first · BYOK";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-secondary;
+                                }
+                                Text {
+                                    text: "Hotkey: Ctrl + Shift + R  (toggle main window)";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-hint;
+                                }
+                            }
+                        }
                     }
 
                     if root.current-tab == "voice-typing": SettingsPlaceholder {
@@ -1085,12 +1138,12 @@ component SettingsScreen inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AI Translate";
+    title: "Vọng AI Recorder";
     // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
     width: 1280px;
     height: 800px;
     background: Tokens.bg;
-    icon: @image-url("");
+    icon: @image-url("../assets/icon-64.png");
 
     // Driven by Rust at ~30 fps via Slint Timer.
     //   peak-level       — [0.0, 1.0] from vong-audio PeakMeter
@@ -1149,6 +1202,10 @@ export component AppWindow inherits Window {
     in-out property <string> current-view: "main";
     in-out property <string> current-settings-tab: "recording";
 
+    // Connection status indicator (bottom-left footer dot)
+    in property <bool> provider-online: false;
+    in property <string> provider-status-label: "Whisper local";
+
     // ──── Soniox-inspired layout ─────────────────────────────────────
     //   Header bar (compact)
     //   ┌─────────────┬──────────────────────────────────────────────┐
@@ -1164,7 +1221,7 @@ export component AppWindow inherits Window {
     //
     // Hero block + Phase 0 status card removed — Soniox dashboards prioritize
     // the transcript over branding chrome. App branding stays in HeaderBar
-    // (logo + "AI Translate" text) and footer ("ai-translate · Privacy-first · BYOK").
+    // (logo + "Vọng AI Recorder" text) and footer ("vong-ai-recorder · Privacy-first · BYOK").
     VerticalBox {
         padding: 0px;
         spacing: 0px;
@@ -1353,7 +1410,8 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Footer
+        // Footer — bottom-left shows provider connection status (label + dot),
+        // bottom-right keeps the app handle.
         Rectangle {
             height: 36px;
             background: Tokens.surface;
@@ -1363,15 +1421,41 @@ export component AppWindow inherits Window {
                 padding-right: 20px;
                 alignment: space-between;
 
-                Text {
-                    text: "Privacy-first · BYOK · Audio never leaves your device";
-                    font-size: Tokens.font-caption;
-                    color: Tokens.text-hint;
-                    vertical-alignment: center;
+                HorizontalBox {
+                    spacing: 16px;
+                    alignment: start;
+
+                    HorizontalBox {
+                        spacing: 8px;
+                        alignment: start;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: provider-online ? Tokens.success : #555555;
+                            border-width: 1px;
+                            border-color: provider-online ? #166534 : #333333;
+                            y: (parent.height - self.height) / 2;
+                            animate background { duration: 200ms; }
+                        }
+                        Text {
+                            text: provider-status-label + (provider-online ? "  ·  online" : "  ·  offline");
+                            font-size: Tokens.font-caption;
+                            color: provider-online ? Tokens.text-primary : Tokens.text-hint;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Privacy-first · BYOK · Audio never leaves your device";
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-hint;
+                        vertical-alignment: center;
+                    }
                 }
 
                 Text {
-                    text: "ai-translate";
+                    text: "vong-ai-recorder";
                     font-size: Tokens.font-caption;
                     color: Tokens.text-hint;
                     vertical-alignment: center;

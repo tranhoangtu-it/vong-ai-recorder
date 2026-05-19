@@ -1,4 +1,4 @@
-//! Vọng STT — Main entry point.
+//! Vọng AI Recorder — Main entry point.
 //!
 //! Phase 0: Slint hello window with design tokens preview.
 //! Phase 1 + 3 + 4 + 6 (Windows-first, local STT, on-disk history):
@@ -6,6 +6,15 @@
 //!   → earshot VAD FSM → Utterance pack → Whisper.cpp local inference
 //!   → TranscriptEvent::Final → SQLite FTS5 (NFC-normalized for VN tone search).
 //! UI shows live peak meter, utterance counter, latest transcript, and session id.
+
+// On Windows release builds, mark the binary as a GUI subsystem app so
+// double-clicking vong.exe does NOT spawn a console window alongside the
+// Slint UI. Dev builds (`cargo run`) keep the console so stderr logs stay
+// visible during development.
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 mod log_init;
 mod tray;
@@ -108,6 +117,11 @@ struct PipelineState {
     /// and the UI stays idle. Toggled by the mic button between the two
     /// transcript columns. Default `false` (off until explicit click).
     is_recording: std::sync::atomic::AtomicBool,
+    /// Provider connection state. For Whisper local, true after the model
+    /// is loaded. For Soniox/OpenAI, true after the WebSocket Connected
+    /// event lands and false after Disconnected. Drives the bottom-left
+    /// status dot (green/gray).
+    provider_online: std::sync::atomic::AtomicBool,
 }
 
 /// Local mirror of Slint's `TranscriptLine` struct for in-Rust storage.
@@ -311,6 +325,14 @@ fn init_audio(
     tracing::info!(provider = %provider_mode.id(), "STT provider mode selected");
     ui.set_current_provider_mode(provider_label(provider_mode).into());
     ui.set_provider_is_cloud(provider_mode != ProviderMode::LocalWhisper);
+    // Short label for the footer status indicator — strip the emoji prefix
+    // off the picker label for a tighter footer.
+    let short = match provider_mode {
+        ProviderMode::LocalWhisper => "Whisper local",
+        ProviderMode::SonioxCloud => "Soniox",
+        ProviderMode::OpenAIRealtime => "OpenAI Realtime",
+    };
+    ui.set_provider_status_label(short.into());
 
     match provider_mode {
         ProviderMode::SonioxCloud => match ApiKey::load("soniox") {
@@ -508,6 +530,7 @@ fn init_audio(
 
             let session_id = state_ui.session_id.load(Ordering::Relaxed);
             let persisted = state_ui.segments_persisted.load(Ordering::Relaxed);
+            let online = state_ui.provider_online.load(Ordering::Acquire);
 
             let transcript = state_ui
                 .last_transcript
@@ -518,6 +541,7 @@ fn init_audio(
             // Update main window
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_peak_level(level);
+                ui.set_provider_online(online);
 
                 let footer = if warming {
                     "🔥  Đang khởi động Whisper  ·  compile Vulkan shader pipelines …".to_string()
@@ -1432,6 +1456,9 @@ fn spawn_event_consumer(
             match evt {
                 TranscriptEvent::Connected => {
                     tracing::info!("STT: connected");
+                    state
+                        .provider_online
+                        .store(true, std::sync::atomic::Ordering::Release);
                 }
                 TranscriptEvent::Partial { seq, text, language } => {
                     // Streaming partial — Whisper's first pass on the in-progress
@@ -1549,6 +1576,9 @@ fn spawn_event_consumer(
                 }
                 TranscriptEvent::Disconnected => {
                     tracing::info!("STT: disconnected");
+                    state
+                        .provider_online
+                        .store(false, std::sync::atomic::Ordering::Release);
                 }
                 _ => {}
             }

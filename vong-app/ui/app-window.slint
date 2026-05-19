@@ -555,9 +555,18 @@ component TranscriptColumn inherits Rectangle {
     in property <string> title;
     in property <bool> use-original;
     in property <color> accent-color: Tokens.accent;
+    // Per-corner radius overrides — caller sets the inner-bottom corner large
+    // (e.g. 40 px) so the bottom edge curves heavily toward the round mic
+    // button sitting between the two columns. Outer corners stay at 8 px.
+    in property <length> radius-bl: 8px;
+    in property <length> radius-br: 8px;
 
     background: Tokens.surface;
     border-radius: 8px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: radius-bl;
+    border-bottom-right-radius: radius-br;
     border-width: 1px;
     border-color: Tokens.border;
 
@@ -830,58 +839,84 @@ export component AppWindow inherits Window {
                 spacing: 10px;
                 horizontal-stretch: 1;
 
-                HorizontalBox {
-                    spacing: 10px;
-                    padding: 0px;
+                // Stack:  ┌Bản gốc┐  ┌Bản dịch┐
+                //          │       │  │        │
+                //          ╰───────╯  ╰────────╯
+                //                ╲ ◯ ╱
+                //              ( Nhấn để ghi )
+                //
+                // The mic button "joins" the two columns from BELOW, sitting
+                // in the gap between them. The columns themselves are normal
+                // rounded rectangles — the button visually connects them via
+                // its centered horizontal position + a slight upward overlap
+                // (`y: -28px`) into the bottom border of both columns.
+                Rectangle {
                     vertical-stretch: 1;
+                    background: transparent;
 
-                    TranscriptColumn {
-                        lines: transcript-lines;
-                        title: "Bản gốc";
-                        use-original: true;
-                        accent-color: #4ADE80; // success green — real-time / first
-                        horizontal-stretch: 1;
+                    // Row of two transcript columns — fills the WHOLE Rectangle
+                    // minus the button cradle reserved at the bottom (60 px).
+                    // The button visually overlaps into the columns' bottom
+                    // edge (~30 px) so it looks like it "joins" them.
+                    HorizontalBox {
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height - 60px;
+                        spacing: 10px;
+                        padding: 0px;
+
+                        TranscriptColumn {
+                            lines: transcript-lines;
+                            title: "Bản gốc";
+                            use-original: true;
+                            accent-color: #4ADE80; // success green — real-time / first
+                            radius-br: 96px; // heavy curve toward the mic button
+                            horizontal-stretch: 1;
+                        }
+
+                        TranscriptColumn {
+                            lines: transcript-lines;
+                            title: "Bản dịch";
+                            use-original: false;
+                            accent-color: Tokens.accent; // violet — translated
+                            radius-bl: 96px; // heavy curve toward the mic button
+                            horizontal-stretch: 1;
+                        }
                     }
 
-                    // Mic button column — vertically centered between the
-                    // two transcript panels, fixed width so it doesn't squeeze
-                    // the panels. User taps to start/stop recording.
+                    // Mic button cradle — anchored to the BOTTOM CENTER of
+                    // the Rectangle so the round button sits horizontally
+                    // centered between the two transcript columns above it.
+                    // y starts inside the columns' bottom edge to give the
+                    // "nối tiếp" (joining) feel the user asked for.
                     VerticalLayout {
-                        width: 84px;
+                        x: (parent.width - self.width) / 2;
+                        y: parent.height - self.height;
+                        width: 160px;
+                        height: 96px;
                         alignment: center;
-                        spacing: 8px;
+                        spacing: 6px;
 
-                        Rectangle {
-                            width: 100%;
-                            horizontal-stretch: 0;
-                            height: 64px;
-                            background: transparent;
-                            HorizontalLayout {
-                                alignment: center;
-                                RecordButton {
-                                    active: recording;
-                                    toggled(on) => {
-                                        root.recording = on;
-                                        root.record-toggled(on);
-                                    }
+                        HorizontalLayout {
+                            alignment: center;
+                            RecordButton {
+                                active: recording;
+                                toggled(on) => {
+                                    root.recording = on;
+                                    root.record-toggled(on);
                                 }
                             }
                         }
                         Text {
-                            text: recording ? "Đang ghi…" : "Nhấn để ghi";
+                            text: recording ? "● Đang ghi…  (nhấn để dừng)" : "Nhấn để ghi";
                             font-size: Tokens.font-caption;
+                            font-weight: recording ? 700 : 400;
                             color: recording ? Tokens.danger : Tokens.text-hint;
                             horizontal-alignment: center;
-                            wrap: word-wrap;
+                            wrap: no-wrap;
+                            overflow: elide;
                         }
-                    }
-
-                    TranscriptColumn {
-                        lines: transcript-lines;
-                        title: "Bản dịch";
-                        use-original: false;
-                        accent-color: Tokens.accent; // violet — translated
-                        horizontal-stretch: 1;
                     }
                 }
 

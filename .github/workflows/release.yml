@@ -3,19 +3,38 @@ name: Release
 on:
   push:
     tags:
+      - "v*-beta.*"
+      - "v*-rc.*"
       - "v*"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — build + hash only, skip R2 upload and GitHub Release"
+        type: boolean
+        required: false
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
 
-# NOTE: the GitHub repo IS the `app/` workspace (no nested `app/` subdir).
-# So every step runs at the checkout root — no `working-directory: app`.
+# NOTE: The GitHub repo IS the `app/` workspace root — no nested `app/` subdir.
+# Every step runs at the checkout root; no `working-directory: app` needed.
+
+permissions:
+  contents: write   # required for softprops/action-gh-release to create releases
 
 jobs:
-  release-windows:
-    name: Build Windows release artifacts
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 1: CPU-only MSI (parallel with Vulkan)
+  # ──────────────────────────────────────────────────────────────────────────
+  build-cpu:
+    name: Build CPU MSI
     runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      msi_name: ${{ steps.rename.outputs.msi_name }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,57 +45,417 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release (CPU only)
-        run: cargo build --workspace --release
+        run: cargo build --bin vong --release
 
-      - name: Verify binary size
+      - name: Verify binary size (<15 MB gate)
+        id: size-check
         shell: pwsh
         run: |
           $size = (Get-Item target\release\vong.exe).Length
-          Write-Output "CPU binary size: $([math]::Round($size/1MB,1)) MB"
+          $mb = [math]::Round($size / 1MB, 1)
+          Write-Output "CPU binary size: $mb MB ($size bytes)"
+          if ($size -gt 15728640) {
+            Write-Error "Binary size ${mb} MB exceeds 15 MB gate — aborting release"
+            exit 1
+          }
 
-      - name: Install cargo-wix
-        run: cargo install cargo-wix --locked
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          # Strip leading 'v' — e.g. "v0.1.0-beta.1" → "0.1.0-beta.1"
+          $version = $tag.TrimStart("v")
+          Write-Output "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Output "Extracted version: $version"
 
       - name: Install WiX Toolset
         run: choco install wixtoolset --confirm --no-progress
 
-      - name: Initialize WiX config (first run)
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked --version 0.3.9
+
+      - name: Ensure WiX config exists
         shell: pwsh
         run: |
-          # Workspace has multiple crates → must scope to `vong-app` (the binary).
+          # main.wxs is committed — this is a no-op guard in case it ever disappears.
+          if (-not (Test-Path vong-app\wix\main.wxs)) {
+            Write-Output "main.wxs missing — regenerating (should not happen in normal flow)"
+            cargo wix init --package vong-app --force
+          }
+
+      - name: Build MSI (CPU)
+        run: cargo wix --package vong-app --no-build --nocapture
+
+      - name: Rename MSI to canonical name
+        id: rename
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $src = Get-ChildItem target\wix\*.msi -ErrorAction Stop | Select-Object -First 1
+          $dstName = "Vong-AI-Recorder-$version-x86_64.msi"
+          $dst = "target\wix\$dstName"
+          Move-Item $src.FullName $dst
+          Write-Output "Renamed: $($src.Name) → $dstName"
+          Write-Output "msi_name=$dstName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload CPU MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vong-msi-cpu
+          path: target/wix/Vong-AI-Recorder-*-x86_64.msi
+          if-no-files-found: error
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2: Vulkan MSI (parallel with CPU — continue-on-error so SDK issues
+  #         don't block the CPU release)
+  # ──────────────────────────────────────────────────────────────────────────
+  build-vulkan:
+    name: Build Vulkan MSI
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      msi_name: ${{ steps.rename.outputs.msi_name }}
+      build_ok: ${{ steps.mark-ok.outputs.build_ok }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (Vulkan key)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: vulkan-${{ runner.os }}
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --confirm --no-progress
+          # Reload PATH so VULKAN_SDK env var is available in subsequent steps
+          $vulkanDir = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          Write-Output "VULKAN_SDK=$vulkanDir" >> $env:GITHUB_ENV
+          Write-Output "Vulkan SDK installed at: $vulkanDir"
+
+      - name: Install Ninja build system
+        run: choco install ninja --confirm --no-progress
+
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          Write-Output "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Output "Extracted version: $version"
+
+      - name: Build release (Vulkan)
+        shell: pwsh
+        run: |
+          $env:CMAKE_GENERATOR = "Ninja"
+          cargo build --bin vong --release --features vulkan
+
+      - name: Install WiX Toolset
+        run: choco install wixtoolset --confirm --no-progress
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked --version 0.3.9
+
+      - name: Ensure WiX config exists
+        shell: pwsh
+        run: |
           if (-not (Test-Path vong-app\wix\main.wxs)) {
             cargo wix init --package vong-app --force
           }
 
-      - name: Build MSI installer
+      - name: Build MSI (Vulkan)
         run: cargo wix --package vong-app --no-build --nocapture
 
-      - name: List release artifacts
+      - name: Rename MSI to canonical Vulkan name
+        id: rename
         shell: pwsh
         run: |
-          # cargo-wix writes MSI to target/wix/ by default, regardless of package
-          Get-ChildItem -Recurse -Filter "*.msi" target -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Output "$($_.FullName) — $([math]::Round($_.Length/1MB,1)) MB"
-          }
+          $version = "${{ steps.version.outputs.version }}"
+          $src = Get-ChildItem target\wix\*.msi -ErrorAction Stop | Select-Object -First 1
+          $dstName = "Vong-AI-Recorder-$version-vulkan-x86_64.msi"
+          $dst = "target\wix\$dstName"
+          Move-Item $src.FullName $dst
+          Write-Output "Renamed: $($src.Name) → $dstName"
+          Write-Output "msi_name=$dstName" >> $env:GITHUB_OUTPUT
 
-      - name: Upload release artifacts
+      - name: Upload Vulkan MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vong-windows-release
-          path: |
-            target/release/vong.exe
-            target/wix/*.msi
-            target/**/wix/*.msi
-          if-no-files-found: warn
+          name: vong-msi-vulkan
+          path: target/wix/Vong-AI-Recorder-*-vulkan-x86_64.msi
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Attach to GitHub Release
+      - name: Mark Vulkan build succeeded
+        id: mark-ok
+        run: echo "build_ok=true" >> $env:GITHUB_OUTPUT
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 3: Publish — R2 upload + GitHub Release draft
+  # Runs only after both build jobs finish (Vulkan is allowed to fail).
+  # Skipped entirely when dry_run=true.
+  # ──────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to R2 + GitHub
+    runs-on: windows-latest
+    timeout-minutes: 15
+    needs: [build-cpu, build-vulkan]
+    # Run even if Vulkan failed (continue-on-error on Vulkan job), but only
+    # if CPU succeeded. Dry-run skips entirely.
+    if: |
+      !cancelled() &&
+      needs.build-cpu.result == 'success' &&
+      inputs.dry_run != true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CPU MSI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vong-msi-cpu
+          path: dist
+
+      - name: Download Vulkan MSI artifact (optional — skip if build failed)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: vong-msi-vulkan
+          path: dist
+
+      - name: Compute SHA-256 sums
+        id: sha256
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist\*.msi | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Path dist\SHA256SUMS -Encoding ASCII
+          Write-Output "=== SHA256SUMS ==="
+          Get-Content dist\SHA256SUMS
+          Write-Output "=================="
+
+      - name: Upload to R2 — versioned path
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $bucket = "${{ secrets.R2_BUCKET }}"
+
+          # Upload MSIs with long-lived cache header (versioned path — never changes)
+          Get-ChildItem dist\*.msi | ForEach-Object {
+            Write-Output "Uploading $($_.Name) to s3://$bucket/releases/$tag/$($_.Name)"
+            aws s3 cp $_.FullName "s3://$bucket/releases/$tag/$($_.Name)" `
+              --cache-control "public, max-age=31536000, immutable" `
+              --content-type "application/x-msi" `
+              --checksum-algorithm SHA256
+            if ($LASTEXITCODE -ne 0) { Write-Error "Upload failed for $($_.Name)"; exit 1 }
+          }
+
+          # Upload SHA256SUMS with short cache (could be re-run for same tag)
+          Write-Output "Uploading SHA256SUMS"
+          aws s3 cp dist\SHA256SUMS "s3://$bucket/releases/$tag/SHA256SUMS" `
+            --cache-control "public, max-age=3600" `
+            --content-type "text/plain; charset=utf-8" `
+            --checksum-algorithm SHA256
+          if ($LASTEXITCODE -ne 0) { Write-Error "Upload failed for SHA256SUMS"; exit 1 }
+
+      - name: Mirror to R2 — latest path (all beta/rc tags included for easy testing)
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          $bucket = "${{ secrets.R2_BUCKET }}"
+          $tag = "${{ github.ref_name }}"
+
+          # Upload MSIs to latest/ — strip version from filename for stable URL
+          # e.g. "Vong-AI-Recorder-0.1.0-beta.1-x86_64.msi" → "Vong-AI-Recorder-x86_64.msi"
+          Get-ChildItem dist\*.msi | ForEach-Object {
+            $latestName = $_.Name -replace "-\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?(?=-(vulkan-)?x86_64\.msi)", ""
+            Write-Output "Mirroring $($_.Name) → latest/$latestName"
+            aws s3 cp $_.FullName "s3://$bucket/releases/latest/$latestName" `
+              --cache-control "no-cache, no-store, must-revalidate" `
+              --content-type "application/x-msi" `
+              --checksum-algorithm SHA256
+          }
+
+          # Latest SHA256SUMS — no-cache so it always reflects the current latest
+          aws s3 cp dist\SHA256SUMS "s3://$bucket/releases/latest/SHA256SUMS" `
+            --cache-control "no-cache, no-store, must-revalidate" `
+            --content-type "text/plain; charset=utf-8"
+          Write-Output "Mirrored to latest/ path for tag $tag"
+
+      - name: Create GitHub Release (draft)
+        id: gh-release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/release/vong.exe
-            target/wix/*.msi
-            target/**/wix/*.msi
           draft: true
-          prerelease: true
+          prerelease: ${{ contains(github.ref_name, '-beta.') || contains(github.ref_name, '-rc.') }}
           generate_release_notes: true
+          files: |
+            dist/*.msi
+            dist/SHA256SUMS
+          body: |
+            ## Vọng AI Recorder ${{ github.ref_name }}
+
+            ### Download
+
+            Download from **Cloudflare R2** (recommended — no login required, fast global CDN):
+
+            | Variant | Link |
+            |---------|------|
+            | CPU (default, ~12 MB) | [${{ needs.build-cpu.outputs.msi_name }}](${{ secrets.R2_PUBLIC_BASE }}/releases/${{ github.ref_name }}/${{ needs.build-cpu.outputs.msi_name }}) |
+            | Vulkan GPU (~65 MB) | [${{ github.ref_name }}](${{ secrets.R2_PUBLIC_BASE }}/releases/${{ github.ref_name }}) |
+
+            SHA-256 checksums: [${{ secrets.R2_PUBLIC_BASE }}/releases/${{ github.ref_name }}/SHA256SUMS](${{ secrets.R2_PUBLIC_BASE }}/releases/${{ github.ref_name }}/SHA256SUMS)
+
+            ### Verify download integrity (PowerShell)
+
+            ```powershell
+            # Download and verify
+            $file = "Vong-AI-Recorder-${{ needs.build-cpu.outputs.version }}-x86_64.msi"
+            Get-FileHash $file -Algorithm SHA256
+            # Compare hash to SHA256SUMS above
+            ```
+
+            ### SmartScreen warning
+
+            Windows SmartScreen may flag this installer as "unknown publisher" because the binary is not yet Authenticode-signed (code signing certificate is a post-beta milestone). This is expected.
+
+            **To proceed**: Click "More info" → "Run anyway". Or verify the SHA-256 hash matches the published value above.
+
+            See [vong.app](https://vong.app) for more information.
+
+            ---
+            > This release was built automatically by GitHub Actions. Publish this draft only after smoke-testing the installer on a clean Windows VM.
+
+      - name: Write workflow summary
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $base = "${{ secrets.R2_PUBLIC_BASE }}"
+          $bucket = "${{ secrets.R2_BUCKET }}"
+          $cpuMsi = "Vong-AI-Recorder-$version-x86_64.msi"
+          $vulkanMsi = "Vong-AI-Recorder-$version-vulkan-x86_64.msi"
+
+          # Read hashes from the generated file
+          $hashes = @{}
+          Get-Content dist\SHA256SUMS | ForEach-Object {
+            $parts = $_ -split "  ", 2
+            if ($parts.Length -eq 2) { $hashes[$parts[1].Trim()] = $parts[0].Trim() }
+          }
+
+          $cpuHash = $hashes[$cpuMsi]
+          $vulkanHash = $hashes[$vulkanMsi]
+
+          $summary = @"
+          ## Release $tag — Pipeline Summary
+
+          ### R2 Download URLs
+
+          | Variant | URL |
+          |---------|-----|
+          | CPU MSI | $base/releases/$tag/$cpuMsi |
+          | Vulkan MSI | $base/releases/$tag/$vulkanMsi |
+          | SHA256SUMS | $base/releases/$tag/SHA256SUMS |
+
+          ### SHA-256 Checksums (copy-paste ready)
+
+          ``````
+          $cpuHash  $cpuMsi
+          $vulkanHash  $vulkanMsi
+          ``````
+
+          ### Next Steps
+
+          1. Smoke-test the installer on a clean Windows 10/11 VM — download the CPU MSI from the R2 URL above.
+          2. Verify hash: ``Get-FileHash <file.msi> -Algorithm SHA256``
+          3. Publish the GitHub Release draft: **Releases → $tag → Edit → Publish release**.
+          4. Update the landing page Download section with the R2 URLs and hashes.
+          5. Announce to beta testers.
+
+          ### Cleanup (if this was a test run)
+
+          ``````powershell
+          # Remove dummy tag
+          git tag -d $tag
+          git push --delete origin $tag
+
+          # Remove R2 objects
+          aws s3 rm "s3://$bucket/releases/$tag/" --recursive ``
+            --endpoint-url "https://<account-id>.r2.cloudflarestorage.com" --region auto
+          ``````
+          "@
+
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Dry-run summary (only when dry_run=true — skips R2 + GH Release)
+  # ──────────────────────────────────────────────────────────────────────────
+  dry-run-summary:
+    name: Dry Run Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-cpu, build-vulkan]
+    if: |
+      !cancelled() &&
+      needs.build-cpu.result == 'success' &&
+      inputs.dry_run == true
+
+    steps:
+      - name: Download CPU MSI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: vong-msi-cpu
+          path: dist
+
+      - name: Download Vulkan MSI artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: vong-msi-vulkan
+          path: dist
+
+      - name: Compute SHA-256 sums (dry run verification)
+        shell: bash
+        run: |
+          echo "=== DRY RUN — Artifacts produced (NOT uploaded to R2 or GitHub) ==="
+          for f in dist/*.msi; do
+            sha256sum "$f" || shasum -a 256 "$f"
+          done
+
+      - name: Write dry-run summary
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "## Dry Run Complete — $TAG" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifacts built successfully. **No files were uploaded to R2 or GitHub.**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          for f in dist/*; do
+            SIZE=$(wc -c < "$f")
+            echo "- \`$(basename $f)\` — $SIZE bytes" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Next Step" >> "$GITHUB_STEP_SUMMARY"
+          echo "Re-run without dry_run=true (or push a real tag) to publish." >> "$GITHUB_STEP_SUMMARY"

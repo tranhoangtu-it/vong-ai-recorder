@@ -1,0 +1,141 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  WiX v3 installer manifest for Vọng AI Recorder.
+
+  CRITICAL — UpgradeCode MUST NEVER change across versions.
+  Windows uses this GUID to detect upgrades and prevent duplicate Programs entries.
+  UpgradeCode: FFC0DF45-51D5-45F8-A336-A5113CAFC06D
+
+  Per-user install: no UAC prompt, installs to %LocalAppData%\Programs\Vong AI Recorder\
+  Hardening: InstallScope=perUser + ALLUSERS='' + MSIINSTALLPERUSER=1
+  Writes only to: LocalAppDataFolder, AppDataFolder, HKCU (compliant with no-UAC requirement)
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='Vọng AI Recorder'
+        UpgradeCode='{FFC0DF45-51D5-45F8-A336-A5113CAFC06D}'
+        Manufacturer='Vọng'
+        Language='1033'
+        Codepage='1252'
+        Version='!(bind.FileVersion.vongEXE)'>
+
+        <Package
+            Id='*'
+            Keywords='Installer'
+            Description='Vọng AI Recorder installer'
+            Manufacturer='Vọng'
+            InstallerVersion='500'
+            Languages='1033'
+            Compressed='yes'
+            SummaryCodepage='1252'
+            InstallScope='perUser' />
+
+        <!--
+          Per-user install hardening — all three properties required to
+          prevent UAC elevation prompt on double-click install.
+          See: https://learn.microsoft.com/en-us/windows/win32/msi/allusers
+        -->
+        <Property Id='ALLUSERS' Value='' />
+        <Property Id='MSIINSTALLPERUSER' Value='1' />
+
+        <!-- Programs and Features (ARP) display metadata -->
+        <Icon Id='ProductIcon' SourceFile='..\assets\icon.ico' />
+        <Property Id='ARPPRODUCTICON' Value='ProductIcon' />
+        <Property Id='ARPHELPLINK' Value='https://vong.app' />
+        <Property Id='ARPURLINFOABOUT' Value='https://vong.app' />
+        <Property Id='ARPNOMODIFY' Value='1' />
+        <Property Id='ARPNOREPAIR' Value='1' />
+
+        <!--
+          MajorUpgrade: installing a newer version over an older one replaces
+          it in-place (single Programs entry). AllowSameVersionUpgrades lets
+          reinstalling the same version succeed (useful during beta testing).
+        -->
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            AllowSameVersionUpgrades='yes'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Please uninstall it first.' />
+
+        <MediaTemplate EmbedCab='yes' />
+
+        <!-- WiX UI: minimal two-button (Install/Cancel) with license screen.
+             Keeps the serious-product tone; license.rtf is AGPL-3.0 notice. -->
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
+        <UIRef Id='WixUI_Minimal' />
+
+        <!--
+          Directory tree: routes installation to
+          %LocalAppData%\Programs\Vong AI Recorder\
+          (per-user compliant — no write to ProgramFilesFolder or HKLM)
+        -->
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='LocalAppDataFolder'>
+                <Directory Id='ProgramsFolder' Name='Programs'>
+                    <Directory Id='APPLICATIONFOLDER' Name='Vong AI Recorder'>
+
+                        <!-- Main application binary -->
+                        <Component Id='MainExecutable' Guid='{0F4C24A4-878D-477B-A38D-DBFAE84D5AB8}'>
+                            <File
+                                Id='vongEXE'
+                                Name='vong.exe'
+                                DiskId='1'
+                                Source='target\release\vong.exe'
+                                KeyPath='yes' />
+                        </Component>
+
+                    </Directory>
+                </Directory>
+            </Directory>
+
+            <!--
+              Start Menu shortcut — per-user install writes to user's
+              ProgramMenuFolder (no UAC). Registry key in HKCU acts as
+              KeyPath so WiX can track and remove it on uninstall.
+
+              User data under %APPDATA%\Vong\ is created by the app at first
+              launch and is intentionally NOT removed on uninstall (preserves
+              recordings and transcripts).
+            -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Vọng AI Recorder' />
+            </Directory>
+        </Directory>
+
+        <DirectoryRef Id='ApplicationProgramsFolder'>
+            <Component Id='StartMenuShortcut' Guid='{8B8CE3F9-950C-4159-B6EE-C1D9D43BC789}'>
+                <Shortcut
+                    Id='AppStartMenuShortcut'
+                    Name='Vọng AI Recorder'
+                    Description='Desktop audio recording and multilingual transcription'
+                    Target='[APPLICATIONFOLDER]vong.exe'
+                    WorkingDirectory='APPLICATIONFOLDER'
+                    Icon='ProductIcon'
+                    IconIndex='0' />
+                <!--
+                  HKCU registry key is the KeyPath — required for WiX to
+                  correctly install/remove the shortcut component in per-user
+                  mode (cannot use file as KeyPath in ProgramMenuFolder).
+                -->
+                <RegistryValue
+                    Root='HKCU'
+                    Key='Software\Vong\Vong AI Recorder'
+                    Name='installed'
+                    Type='integer'
+                    Value='1'
+                    KeyPath='yes' />
+                <RemoveFolder
+                    Id='RemoveApplicationProgramsFolder'
+                    Directory='ApplicationProgramsFolder'
+                    On='uninstall' />
+            </Component>
+        </DirectoryRef>
+
+        <Feature Id='Complete' Title='Vọng AI Recorder' Level='1'>
+            <ComponentRef Id='MainExecutable' />
+            <ComponentRef Id='StartMenuShortcut' />
+        </Feature>
+
+    </Product>
+</Wix>

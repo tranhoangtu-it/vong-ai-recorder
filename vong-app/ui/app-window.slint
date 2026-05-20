@@ -6,6 +6,7 @@
 // Design tokens mirror `docs/design.md`.
 
 import { VerticalBox, HorizontalBox, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
+import { WizardOverlay } from "wizard.slint";
 
 // Soniox-style transcript line — single utterance with timestamp + language tag.
 //
@@ -131,49 +132,6 @@ component HeaderBar inherits Rectangle {
     }
 }
 
-component StatusCard inherits Rectangle {
-    in property <string> title;
-    in property <string> body;
-    in property <color> dot-color: Tokens.success;
-
-    background: Tokens.surface;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Tokens.border;
-
-    VerticalBox {
-        padding: 16px;
-        spacing: 6px;
-
-        HorizontalBox {
-            spacing: 8px;
-            alignment: start;
-            // Status dot
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: dot-color;
-                y: (parent.height - self.height) / 2;
-            }
-            Text {
-                text: title;
-                font-size: Tokens.font-secondary;
-                font-weight: 600;
-                color: Tokens.text-primary;
-                vertical-alignment: center;
-            }
-        }
-
-        Text {
-            text: body;
-            font-size: Tokens.font-caption;
-            color: Tokens.text-secondary;
-            wrap: word-wrap;
-        }
-    }
-}
-
 // Compact peak meter strip — Soniox apps put this at bottom-of-main as a
 // thin status bar. Status + footer text inline; the peak bar is the
 // horizontal accent.
@@ -242,81 +200,8 @@ component PeakMeter inherits Rectangle {
     }
 }
 
-// Onboarding banner — shown only on first launch. Dismissible. Compact intro
-// explaining the three killer features. Persists completion state in config.
-component OnboardingBanner inherits Rectangle {
-    callback dismiss();
-
-    background: #1a1133; // tinted violet for distinction from regular cards
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Tokens.accent;
-
-    VerticalBox {
-        padding: 16px;
-        spacing: 8px;
-
-        HorizontalBox {
-            spacing: 8px;
-            alignment: space-between;
-
-            HorizontalBox {
-                spacing: 8px;
-                alignment: start;
-                Text {
-                    text: "👋";
-                    font-size: 18px;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: "Chào mừng tới Vọng AI Recorder";
-                    font-size: Tokens.font-h2;
-                    font-weight: 800;
-                    color: Tokens.text-primary;
-                    vertical-alignment: center;
-                }
-            }
-
-            dismiss-touch := TouchArea {
-                width: 20px;
-                height: 20px;
-                clicked => { root.dismiss(); }
-                Text {
-                    text: "✕";
-                    font-size: 14px;
-                    color: dismiss-touch.has-hover ? Tokens.text-primary : Tokens.text-hint;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-
-        Text {
-            text: "🎙  Ghi mic hoặc loopback từ Speakers (chọn ở mục bên dưới).\n🧠  Whisper Base xử lý local — không gửi audio lên cloud.\n🔎  Tìm bản phiên âm với FTS5 — không dấu vẫn khớp (\"viet\" → \"Việt\").";
-            font-size: Tokens.font-secondary;
-            color: Tokens.text-secondary;
-            wrap: word-wrap;
-        }
-
-        cta-touch := TouchArea {
-            height: 32px;
-            clicked => { root.dismiss(); }
-            Rectangle {
-                background: cta-touch.has-hover ? Tokens.accent : #7c4ce6;
-                border-radius: 6px;
-                animate background { duration: 100ms; }
-                Text {
-                    text: "Bắt đầu sử dụng  →";
-                    font-size: Tokens.font-secondary;
-                    font-weight: 600;
-                    color: white;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-    }
-}
+// OnboardingBanner removed — replaced by the full-screen WizardOverlay (wizard.slint).
+// See AppWindow current-view == "wizard" routing below.
 
 // Audio source picker — enumerates input + output devices. Selecting an output
 // captures via WASAPI loopback (Windows system audio). Selection persists to
@@ -1137,6 +1022,313 @@ component SettingsScreen inherits Rectangle {
     }
 }
 
+// ── Phase 2: model downloader UI types ────────────────────────────────────
+
+// Progress snapshot pushed from Rust via Arc<Mutex<DownloadProgress>> at 30 Hz.
+// Phase 3 wizard mounts ModelDownloadCard and binds its in-properties to these.
+export struct DownloadProgress {
+    state: string,              // "idle"|"fetching"|"hashing"|"done"|"error"|"cancelled"
+    bytes-downloaded: int,      // bytes received so far (truncated to i32; < 2 GB ok for all models)
+    total-bytes: int,           // expected size from LFS pointer
+    eta-secs: int,              // EMA-smoothed seconds remaining; 0 if unknown
+    percent: float,             // 0.0–100.0 pre-computed in Rust
+    error-message: string,      // Vietnamese error string; non-empty only when state == "error"
+}
+
+// Single model card inside the picker grid.
+component ModelCard inherits Rectangle {
+    in property <string> name;          // "tiny" | "base" | "small" | "medium"
+    in property <string> size-label;    // "148 MB"
+    in property <string> speed-desc;    // Vietnamese speed/quality blurb
+    in property <bool> recommended;     // shows "Khuyến nghị" badge when true
+    in property <bool> selected;
+    callback clicked();
+
+    background: selected ? #1e1333 : Tokens.surface;
+    border-radius: 8px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? Tokens.accent : Tokens.border;
+    animate border-color { duration: 120ms; }
+    animate background { duration: 120ms; }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 4px;
+
+        HorizontalBox {
+            spacing: 6px;
+            alignment: space-between;
+            HorizontalBox {
+                spacing: 6px;
+                alignment: start;
+                Text {
+                    text: name;
+                    font-size: Tokens.font-body;
+                    font-weight: 700;
+                    color: selected ? Tokens.text-primary : Tokens.text-secondary;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: size-label;
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+            }
+            if recommended: Rectangle {
+                background: #3b2070;
+                border-radius: 4px;
+                width: 72px;
+                height: 18px;
+                Text {
+                    text: "Khuyến nghị";
+                    font-size: 10px;
+                    font-weight: 600;
+                    color: Tokens.accent;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: speed-desc;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+        }
+    }
+}
+
+// Reusable model downloader card.
+//
+// Usage in Phase 3 wizard (ModelDownloadStep):
+//   ModelDownloadCard {
+//       progress: root.download-progress;
+//       start-download(name) => { root.start-model-download(name); }
+//       cancel-download()    => { root.cancel-model-download(); }
+//   }
+//
+// Does NOT auto-mount in MainView — Phase 3 wizard owns that.
+// Not exported at top level (no Rust code gen for non-Window components).
+component ModelDownloadCard inherits Rectangle {
+    // Current download progress snapshot (pushed by Rust 30 Hz timer).
+    in property <DownloadProgress> progress;
+    // Which model card is currently selected (set on card click).
+    in-out property <string> selected-model: "base";
+    // Fired when user clicks "Tải xuống". Passes the selected model name.
+    callback start-download(string);
+    // Fired when user clicks "Hủy".
+    callback cancel-download();
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // ── Header ──
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Tải model Whisper";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "Chọn model phù hợp. Sau khi tải về, model được lưu vào máy và không cần kết nối internet.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+
+        // ── Model picker (2×2 grid via nested HorizontalBoxes) ──
+        VerticalLayout {
+            spacing: 6px;
+
+            HorizontalLayout {
+                spacing: 6px;
+                ModelCard {
+                    name: "tiny";
+                    size-label: "78 MB";
+                    speed-desc: "Nhanh nhất · chính xác thấp";
+                    recommended: false;
+                    selected: root.selected-model == "tiny";
+                    clicked => { root.selected-model = "tiny"; }
+                    horizontal-stretch: 1;
+                }
+                ModelCard {
+                    name: "base";
+                    size-label: "148 MB";
+                    speed-desc: "Cân bằng · khuyến nghị";
+                    recommended: true;
+                    selected: root.selected-model == "base";
+                    clicked => { root.selected-model = "base"; }
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                ModelCard {
+                    name: "small";
+                    size-label: "488 MB";
+                    speed-desc: "Chính xác cao · chậm hơn";
+                    recommended: false;
+                    selected: root.selected-model == "small";
+                    clicked => { root.selected-model = "small"; }
+                    horizontal-stretch: 1;
+                }
+                ModelCard {
+                    name: "medium";
+                    size-label: "1.5 GB";
+                    speed-desc: "Chính xác cao nhất · cần GPU";
+                    recommended: false;
+                    selected: root.selected-model == "medium";
+                    clicked => { root.selected-model = "medium"; }
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        // ── Progress section (visible while downloading) ──
+        if progress.state == "fetching" || progress.state == "hashing": VerticalLayout {
+            spacing: 6px;
+
+            HorizontalBox {
+                spacing: 8px;
+                alignment: space-between;
+                Text {
+                    text: progress.state == "hashing"
+                        ? "Đang kiểm tra tệp…"
+                        : ("Đang tải · " + progress.percent + "%");
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-secondary;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: progress.eta-secs > 0 ? ("còn ~" + progress.eta-secs + " s") : "";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Progress bar track
+            Rectangle {
+                height: 6px;
+                background: #1f1f1f;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: Tokens.border;
+                clip: true;
+                Rectangle {
+                    x: 0; y: 0;
+                    height: parent.height;
+                    border-radius: 3px;
+                    background: progress.state == "hashing" ? #FBBF24 : Tokens.accent;
+                    width: progress.state == "hashing"
+                        ? parent.width
+                        : parent.width * (progress.percent / 100.0);
+                    animate width { duration: 150ms; easing: ease-out; }
+                }
+            }
+        }
+
+        // ── Done state ──
+        if progress.state == "done": HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Text { text: "✓"; font-size: 16px; color: Tokens.success; vertical-alignment: center; }
+            Text {
+                text: "Model đã tải xong — sẵn sàng sử dụng";
+                font-size: Tokens.font-secondary;
+                color: Tokens.success;
+                vertical-alignment: center;
+            }
+        }
+
+        // ── Error / cancelled state ──
+        if progress.state == "error" || progress.state == "cancelled": HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Text { text: "⚠"; font-size: 16px; color: Tokens.danger; vertical-alignment: center; }
+            Text {
+                text: progress.state == "cancelled"
+                    ? "Đã hủy tải xuống"
+                    : progress.error-message;
+                font-size: Tokens.font-secondary;
+                color: Tokens.danger;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+        }
+
+        // ── Action buttons ──
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+
+            if progress.state != "fetching" && progress.state != "hashing": download-btn := TouchArea {
+                height: 32px;
+                width: 160px;
+                clicked => { root.start-download(root.selected-model); }
+                Rectangle {
+                    background: download-btn.has-hover ? Tokens.accent : #6d3fe0;
+                    border-radius: 6px;
+                    animate background { duration: 100ms; }
+                    Text {
+                        text: progress.state == "done" ? "Tải lại" : "Tải xuống";
+                        font-size: Tokens.font-secondary;
+                        font-weight: 600;
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            if progress.state == "fetching" || progress.state == "hashing": cancel-btn := TouchArea {
+                height: 32px;
+                width: 80px;
+                clicked => { root.cancel-download(); }
+                Rectangle {
+                    background: cancel-btn.has-hover ? #7f1d1d : #4a1010;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Tokens.danger;
+                    animate background { duration: 100ms; }
+                    Text {
+                        text: "Hủy";
+                        font-size: Tokens.font-secondary;
+                        font-weight: 600;
+                        color: Tokens.danger;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Vọng AI Recorder";
     // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
@@ -1167,9 +1359,34 @@ export component AppWindow inherits Window {
     in property <bool> restart-needed: false;
     callback audio-source-changed(string);
 
-    // Onboarding banner — only visible on first launch.
-    in-out property <bool> onboarding-visible: false;
-    callback dismiss-onboarding();
+    // Wizard (first-run) — replaced the old OnboardingBanner.
+    // Wizard step index (0–6) — mutated by on_wizard_next / on_wizard_back.
+    in-out property <int> wizard-step: 0;
+    // Provider selected in wizard step 2 (drives branching + ApiKey/Model steps).
+    in-out property <string> wizard-provider: "local-whisper";
+    // Audio device selected in wizard step 1.
+    in-out property <string> wizard-device: "";
+    // API key text entered in wizard step 3.
+    in-out property <string> wizard-api-key: "";
+    // API key test result pushed back from Rust ("" | "ok" | <vi-error-string>).
+    in property <string> api-key-test-result: "";
+    // True while the WS ping is in flight (disables the test button).
+    in property <bool> api-key-testing: false;
+    // True when at least one Whisper model file is on disk (enables Next on step 4).
+    in property <bool> model-ready: false;
+    // Wizard source/target language selections (separate from live config).
+    in-out property <string> wizard-source-language: "vi";
+    in-out property <string> wizard-target-mode: "Dịch sang tiếng Anh";
+
+    // Wizard navigation callbacks — handled in main.rs.
+    callback wizard-next();
+    callback wizard-back();
+    callback wizard-skip();
+    callback wizard-complete();
+    callback wizard-test-api-key(string, string);   // (provider, key)
+    callback wizard-save-api-key(string, string);   // (provider, key)
+    callback wizard-source-changed(string);
+    callback wizard-target-changed(string);
 
     // Export action
     in property <string> export-status: "";
@@ -1202,6 +1419,14 @@ export component AppWindow inherits Window {
     in-out property <string> current-view: "main";
     in-out property <string> current-settings-tab: "recording";
 
+    // Model download progress — fed by Rust 30 Hz timer from Arc<Mutex<DownloadProgress>>.
+    // Phase 3 wizard binds ModelDownloadCard.progress to this property.
+    in property <DownloadProgress> download-progress;
+    // Fired by ModelDownloadCard when user clicks "Tải xuống". Arg = model name.
+    callback start-model-download(string);
+    // Fired by ModelDownloadCard when user clicks "Hủy".
+    callback cancel-model-download();
+
     // Connection status indicator (bottom-left footer dot)
     in property <bool> provider-online: false;
     in property <string> provider-status-label: "Whisper local";
@@ -1226,7 +1451,59 @@ export component AppWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        HeaderBar {
+        // ─── Wizard view — full-screen overlay, no HeaderBar ───
+        // Uses a Rectangle wrapper so the ModelDownloadCard for step 4 can be
+        // overlaid at an absolute position (wizard.slint cannot reference
+        // DownloadProgress or ModelDownloadCard defined here).
+        if current-view == "wizard": Rectangle {
+            vertical-stretch: 1;
+            background: transparent;
+
+            WizardOverlay {
+                width: parent.width;
+                height: parent.height;
+                step <=> wizard-step;
+                selected-provider <=> wizard-provider;
+                selected-device <=> wizard-device;
+                audio-devices: audio-sources;
+                source-language-options: source-language-options;
+                selected-source-language <=> wizard-source-language;
+                target-mode-options: target-mode-options;
+                selected-target-mode <=> wizard-target-mode;
+                api-key-text <=> wizard-api-key;
+                api-key-test-result: api-key-test-result;
+                api-key-testing: api-key-testing;
+                model-ready: model-ready;
+                next => { root.wizard-next(); }
+                back => { root.wizard-back(); }
+                skip => { root.wizard-skip(); }
+                complete => { root.wizard-complete(); }
+                test-api-key(p, k) => { root.wizard-test-api-key(p, k); }
+                save-api-key(p, k) => { root.wizard-save-api-key(p, k); }
+                source-language-changed(v) => { root.wizard-source-changed(v); }
+                target-mode-changed(v) => { root.wizard-target-changed(v); }
+            }
+
+            // Step 4 (Model Download) content injected here — ModelDownloadCard lives
+            // in this file; wizard.slint (imported here) cannot reference it back.
+            // Positioned below the 56px wizard header + ~180px step title block.
+            if wizard-step == 4: Rectangle {
+                y: 56px + 190px;
+                x: 40px;
+                width: parent.width - 80px;
+                height: parent.height - 56px - 190px - 72px; // minus header + title + footer
+                background: transparent;
+                ModelDownloadCard {
+                    width: parent.width;
+                    progress: download-progress;
+                    start-download(name) => { root.start-model-download(name); }
+                    cancel-download() => { root.cancel-model-download(); }
+                }
+            }
+        }
+
+        // Header shown only when not in wizard view
+        if current-view != "wizard": HeaderBar {
             in-settings: current-view == "settings";
             settings-clicked => { root.current-view = "settings"; }
             back-clicked => { root.current-view = "main"; }
@@ -1283,17 +1560,12 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         alignment: start; // cards size to content, no stretch fill
 
-                        if onboarding-visible: OnboardingBanner {
-                            dismiss => {
-                                root.onboarding-visible = false;
-                                root.dismiss-onboarding();
-                            }
-                        }
+                        // First-run onboarding handled by WizardOverlay (current-view == "wizard").
+                        // OnboardingBanner removed — wizard covers the full window until complete.
 
                         // Audio source / Provider / Language pickers moved to
                         // the Settings screen (⚙ Header). Sidebar here keeps
-                        // only per-session controls (history + export) plus
-                        // the first-run onboarding banner above.
+                        // only per-session controls (history + export).
 
                         HistoryCard {
                             text: history-status;

@@ -47,6 +47,10 @@ tests/fixtures/*.wav  # Don't commit large audio fixtures
 build/
 dist/
 
+# WiX MSI build output (large, reproducible from source)
+target/wix/
+*.msi
+
 # API keys (paranoid double-check)
 *.key
 *.pem

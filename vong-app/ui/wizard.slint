@@ -1,0 +1,976 @@
+// First-run wizard overlay — 7-step onboarding flow for Vọng AI Recorder.
+//
+// Mounted by AppWindow when current-view == "wizard".
+// Steps:
+//   0  WelcomeStep     — brand intro + privacy promise
+//   1  AudioSourceStep — pick mic / loopback device
+//   2  ProviderStep    — Whisper Local / Soniox / OpenAI
+//   3  ApiKeyStep      — API key entry + test (cloud providers only)
+//   4  ModelDownloadStep — download Whisper model (LocalWhisper only)
+//   5  LanguageStep    — source language + target mode
+//   6  DoneStep        — recap + CTA
+//
+// Design tokens mirror app-window.slint Tokens global.
+// All copy is in Vietnamese (NF1).
+//
+// DownloadProgress struct + ModelDownloadCard component are defined in
+// app-window.slint and available here via Slint's implicit single-file
+// import when this file is imported into app-window.slint.
+
+import { VerticalBox, HorizontalBox, ScrollView, ComboBox } from "std-widgets.slint";
+
+// ── Step indicator dots ────────────────────────────────────────────────────────
+
+component StepDot inherits Rectangle {
+    in property <bool> active;
+    in property <bool> done;
+
+    width: active ? 20px : 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: done ? #4ADE80 : (active ? #8B5CF6 : #404040);
+    animate width { duration: 180ms; easing: ease-out; }
+    animate background { duration: 120ms; }
+}
+
+export component StepIndicator inherits HorizontalLayout {
+    in property <int> current;
+    in property <int> total;
+
+    spacing: 6px;
+    alignment: center;
+
+    // Dots rendered inline for each of the 7 steps.
+    // Slint doesn't support dynamic `for i in 0..total` over non-model arrays,
+    // so we hard-code 7 dots (total is always 7 in this wizard).
+    StepDot { active: current == 0; done: current > 0; }
+    StepDot { active: current == 1; done: current > 1; }
+    StepDot { active: current == 2; done: current > 2; }
+    StepDot { active: current == 3; done: current > 3; }
+    StepDot { active: current == 4; done: current > 4; }
+    StepDot { active: current == 5; done: current > 5; }
+    StepDot { active: current == 6; done: current > 6; }
+}
+
+// ── Shared wizard card wrapper ────────────────────────────────────────────────
+
+component WizardCard inherits Rectangle {
+    background: #1a1133;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #2a1d4a;
+    clip: true;
+}
+
+// ── Primary action button ─────────────────────────────────────────────────────
+
+// WizardButton defined but not used in current layout (footer uses inline TouchAreas).
+// Kept for potential reuse in Sprint 2 step variants.
+
+// ── Step 0: Welcome ───────────────────────────────────────────────────────────
+
+component WelcomeStep inherits VerticalBox {
+    spacing: 20px;
+    padding: 0px;
+
+    // Brand header
+    HorizontalBox {
+        spacing: 16px;
+        alignment: start;
+
+        Rectangle {
+            width: 64px;
+            height: 64px;
+            border-radius: 16px;
+            background: #2a1d4a;
+            Text {
+                text: "V";
+                font-size: 32px;
+                font-weight: 800;
+                color: #8B5CF6;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalBox {
+            spacing: 4px;
+            alignment: center;
+            Text {
+                text: "Vọng AI Recorder";
+                font-size: 24px;
+                font-weight: 800;
+                color: #FAFAFA;
+            }
+            Text {
+                text: "Phiên âm đa ngôn ngữ · Hoàn toàn riêng tư";
+                font-size: 13px;
+                color: #A3A3A3;
+            }
+        }
+    }
+
+    // Intro paragraph
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 10px;
+            Text {
+                text: "Chào mừng bạn đến với Vọng!";
+                font-size: 16px;
+                font-weight: 700;
+                color: #FAFAFA;
+            }
+            Text {
+                text: "Vọng ghi âm mic hoặc âm thanh hệ thống (loopback), sau đó phiên âm và dịch theo thời gian thực. Toàn bộ xử lý thực hiện cục bộ trên máy của bạn — không có audio nào được gửi lên cloud khi dùng Whisper Local.";
+                font-size: 14px;
+                color: #A3A3A3;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // Privacy promise
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 8px;
+            HorizontalBox {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "🔒"; font-size: 16px; vertical-alignment: center; }
+                Text {
+                    text: "Cam kết bảo mật";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #FAFAFA;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: "• Không thu thập dữ liệu, không telemetry, không analytics.\n• API key được lưu trong Windows Credential Manager — không bao giờ ghi vào file.\n• Bản phiên âm chỉ lưu trên máy bạn (SQLite local).";
+                font-size: 13px;
+                color: #A3A3A3;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // SmartScreen explainer
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 8px;
+            HorizontalBox {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "⚠️"; font-size: 14px; vertical-alignment: center; }
+                Text {
+                    text: "Về cảnh báo SmartScreen";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: #FAFAFA;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: "Vọng chưa có chữ ký Authenticode (sẽ có trong bản phát hành chính thức). Windows SmartScreen có thể hiển thị cảnh báo \"ứng dụng không xác định\" — nhấn \"Vẫn chạy\" để tiếp tục. Mã nguồn mở tại GitHub để kiểm chứng.";
+                font-size: 13px;
+                color: #737373;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// ── Step 1: Audio Source ──────────────────────────────────────────────────────
+
+component AudioSourceStep inherits VerticalBox {
+    in property <[string]> devices;
+    in property <string> selected-device;
+    callback device-selected(string);
+
+    spacing: 16px;
+    padding: 0px;
+
+    Text {
+        text: "Chọn nguồn âm thanh";
+        font-size: 20px;
+        font-weight: 700;
+        color: #FAFAFA;
+    }
+    Text {
+        text: "Chọn mic để phiên âm giọng nói của bạn, hoặc chọn Speakers/Headphones để ghi âm thanh hệ thống (loopback).";
+        font-size: 14px;
+        color: #A3A3A3;
+        wrap: word-wrap;
+    }
+
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 12px;
+
+            Text {
+                text: "Thiết bị âm thanh";
+                font-size: 13px;
+                font-weight: 600;
+                color: #A3A3A3;
+            }
+
+            if devices.length == 0: Text {
+                text: "⚠️  Không tìm thấy thiết bị âm thanh. Kiểm tra kết nối thiết bị và thử lại.";
+                font-size: 14px;
+                color: #F87171;
+                wrap: word-wrap;
+            }
+
+            if devices.length > 0: ComboBox {
+                model: devices;
+                current-value: selected-device;
+                selected(v) => { root.device-selected(v); }
+            }
+
+            Text {
+                text: "💡  Thiết bị đầu ra (Speakers, Headphones) = ghi âm loopback (âm thanh hệ thống).\n     Thiết bị đầu vào (Microphone) = ghi âm giọng nói.";
+                font-size: 12px;
+                color: #737373;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// ── Step 2: Provider ──────────────────────────────────────────────────────────
+
+component ProviderOptionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> badge;
+    in property <bool> selected;
+    in property <bool> recommended;
+    callback clicked();
+
+    background: selected ? #1e1045 : #171717;
+    border-radius: 10px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? #8B5CF6 : #404040;
+    animate border-color { duration: 120ms; }
+    animate background { duration: 120ms; }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    VerticalBox {
+        padding: 14px;
+        spacing: 6px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+
+            VerticalBox {
+                spacing: 3px;
+                Text {
+                    text: root.title;
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: selected ? #FAFAFA : #A3A3A3;
+                }
+                Text {
+                    text: root.subtitle;
+                    font-size: 12px;
+                    color: #737373;
+                    wrap: word-wrap;
+                }
+            }
+
+            if recommended: Rectangle {
+                background: #3b2070;
+                border-radius: 4px;
+                width: 80px;
+                height: 20px;
+                Text {
+                    text: "Khuyến nghị";
+                    font-size: 10px;
+                    font-weight: 600;
+                    color: #8B5CF6;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if badge != "": Text {
+            text: badge;
+            font-size: 11px;
+            color: #4ADE80;
+        }
+    }
+}
+
+component ProviderStep inherits VerticalBox {
+    in-out property <string> selected-provider: "local-whisper";
+    spacing: 16px;
+    padding: 0px;
+
+    Text {
+        text: "Chọn engine phiên âm";
+        font-size: 20px;
+        font-weight: 700;
+        color: #FAFAFA;
+    }
+    Text {
+        text: "Whisper Local chạy hoàn toàn trên máy bạn, không cần API key. Soniox và OpenAI là dịch vụ đám mây — cần BYOK (mang API key của bạn).";
+        font-size: 14px;
+        color: #A3A3A3;
+        wrap: word-wrap;
+    }
+
+    VerticalLayout {
+        spacing: 8px;
+
+        ProviderOptionCard {
+            title: "Whisper Local";
+            subtitle: "Hoàn toàn offline · CPU hoặc GPU (Vulkan) · Không cần API key";
+            badge: "✓  Riêng tư 100% · Miễn phí";
+            recommended: true;
+            selected: selected-provider == "local-whisper";
+            clicked => { selected-provider = "local-whisper"; }
+        }
+
+        ProviderOptionCard {
+            title: "Soniox";
+            subtitle: "WebSocket streaming · Partials theo từng từ · Cần API key";
+            badge: "";
+            recommended: false;
+            selected: selected-provider == "soniox";
+            clicked => { selected-provider = "soniox"; }
+        }
+
+        ProviderOptionCard {
+            title: "OpenAI Realtime";
+            subtitle: "gpt-4o-mini-transcribe · Streaming · Cần OpenAI API key";
+            badge: "";
+            recommended: false;
+            selected: selected-provider == "openai-realtime";
+            clicked => { selected-provider = "openai-realtime"; }
+        }
+    }
+}
+
+// ── Step 3: API Key ───────────────────────────────────────────────────────────
+
+component ApiKeyStep inherits VerticalBox {
+    in property <string> provider;
+    in-out property <string> api-key-input;
+    in property <string> test-result;   // "" = not tested, "ok" = pass, else = error msg
+    in property <bool> testing;
+    callback test-connection();
+    // show-password toggle managed via local state
+    private property <bool> show-password: false;
+
+    spacing: 16px;
+    padding: 0px;
+
+    Text {
+        text: provider == "soniox" ? "API key Soniox" : "API key OpenAI";
+        font-size: 20px;
+        font-weight: 700;
+        color: #FAFAFA;
+    }
+    Text {
+        text: provider == "soniox"
+            ? "Lấy API key tại soniox.com → Dashboard → API Keys. Key được lưu trong Windows Credential Manager."
+            : "Lấy API key tại platform.openai.com → API Keys. Key được lưu trong Windows Credential Manager.";
+        font-size: 14px;
+        color: #A3A3A3;
+        wrap: word-wrap;
+    }
+
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 12px;
+
+            Text {
+                text: provider == "soniox" ? "Soniox API key" : "OpenAI API key";
+                font-size: 13px;
+                font-weight: 600;
+                color: #A3A3A3;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                key-input := Rectangle {
+                    horizontal-stretch: 1;
+                    height: 40px;
+                    background: #0A0A0A;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #404040;
+
+                    key-edit := TextInput {
+                        x: 12px;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width - 24px;
+                        input-type: show-password ? InputType.text : InputType.password;
+                        font-size: 14px;
+                        color: #FAFAFA;
+                        text <=> api-key-input;
+                    }
+                }
+
+                show-btn := TouchArea {
+                    width: 40px;
+                    height: 40px;
+                    clicked => { show-password = !show-password; }
+                    Rectangle {
+                        background: show-btn.has-hover ? #262626 : #171717;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #404040;
+                        Text {
+                            text: show-password ? "🙈" : "👁";
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            test-btn := TouchArea {
+                height: 36px;
+                enabled: api-key-input != "" && !testing;
+                clicked => { root.test-connection(); }
+                Rectangle {
+                    background: test-btn.has-hover && test-btn.enabled
+                        ? #333333 : #262626;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #404040;
+                    opacity: test-btn.enabled ? 1.0 : 0.5;
+                    animate background { duration: 100ms; }
+                    Text {
+                        text: testing ? "Đang kiểm tra…" : "Kiểm tra kết nối";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #A3A3A3;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Test result
+            if test-result == "ok": HorizontalBox {
+                spacing: 6px;
+                alignment: start;
+                Text { text: "✅"; font-size: 14px; vertical-alignment: center; }
+                Text {
+                    text: "Kết nối thành công! API key hợp lệ.";
+                    font-size: 13px;
+                    color: #4ADE80;
+                    vertical-alignment: center;
+                }
+            }
+
+            if test-result != "" && test-result != "ok": HorizontalBox {
+                spacing: 6px;
+                alignment: start;
+                Text { text: "❌"; font-size: 14px; vertical-alignment: center; }
+                Text {
+                    text: test-result;
+                    font-size: 13px;
+                    color: #F87171;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+
+    WizardCard {
+        VerticalBox {
+            padding: 12px;
+            Text {
+                text: "💡  Bỏ qua bước này nếu bạn chưa có API key — có thể cấu hình sau trong Cài đặt.";
+                font-size: 12px;
+                color: #737373;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// ── Step 5: Language ──────────────────────────────────────────────────────────
+
+component LanguageStep inherits VerticalBox {
+    in property <[string]> source-options;
+    in-out property <string> selected-source: "vi";
+    in property <[string]> target-options;
+    in-out property <string> selected-target: "Dịch sang tiếng Anh";
+    callback source-changed(string);
+    callback target-changed(string);
+
+    spacing: 16px;
+    padding: 0px;
+
+    Text {
+        text: "Cài đặt ngôn ngữ";
+        font-size: 20px;
+        font-weight: 700;
+        color: #FAFAFA;
+    }
+    Text {
+        text: "Chọn ngôn ngữ nguồn bạn sẽ nói và chế độ bản dịch đích.";
+        font-size: 14px;
+        color: #A3A3A3;
+        wrap: word-wrap;
+    }
+
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 14px;
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Ngôn ngữ nguồn (Bản gốc)";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #A3A3A3;
+                }
+                ComboBox {
+                    model: source-options;
+                    current-value: selected-source;
+                    selected(v) => { root.source-changed(v); }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: "Chế độ bản dịch (Bản phiên âm)";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #A3A3A3;
+                }
+                ComboBox {
+                    model: target-options;
+                    current-value: selected-target;
+                    selected(v) => { root.target-changed(v); }
+                }
+            }
+
+            Text {
+                text: "💡  Có thể thay đổi bất kỳ lúc nào trong Cài đặt → Language.";
+                font-size: 12px;
+                color: #737373;
+            }
+        }
+    }
+}
+
+// ── Step 6: Done ──────────────────────────────────────────────────────────────
+
+component DoneStep inherits VerticalBox {
+    in property <string> provider;
+    in property <string> source-language;
+    in property <string> audio-device;
+    callback start-recording();
+
+    spacing: 20px;
+    padding: 0px;
+    alignment: center;
+
+    // Big checkmark — centered via HorizontalLayout wrapper
+    HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            width: 80px;
+            height: 80px;
+            border-radius: 40px;
+            background: #14532d;
+            border-width: 2px;
+            border-color: #4ADE80;
+            Text {
+                text: "✓";
+                font-size: 40px;
+                font-weight: 700;
+                color: #4ADE80;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    VerticalBox {
+        spacing: 6px;
+        alignment: center;
+        Text {
+            text: "Sẵn sàng! 🎉";
+            font-size: 24px;
+            font-weight: 800;
+            color: #FAFAFA;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Thiết lập hoàn tất. Nhấn nút bên dưới để bắt đầu ghi âm.";
+            font-size: 14px;
+            color: #A3A3A3;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    // Recap card
+    WizardCard {
+        VerticalBox {
+            padding: 16px;
+            spacing: 8px;
+            Text {
+                text: "Tóm tắt cài đặt";
+                font-size: 13px;
+                font-weight: 600;
+                color: #A3A3A3;
+            }
+            Text {
+                text: "• Engine: " + (provider == "local-whisper" ? "Whisper Local (offline)" : (provider == "soniox" ? "Soniox" : "OpenAI Realtime"));
+                font-size: 13px;
+                color: #FAFAFA;
+            }
+            Text {
+                text: "• Ngôn ngữ nguồn: " + source-language;
+                font-size: 13px;
+                color: #FAFAFA;
+            }
+            Text {
+                text: "• Thiết bị: " + audio-device;
+                font-size: 13px;
+                color: #FAFAFA;
+                wrap: word-wrap;
+            }
+        }
+    }
+
+    // CTA button
+    start-btn := TouchArea {
+        height: 48px;
+        width: 280px;
+        clicked => { root.start-recording(); }
+        Rectangle {
+            background: start-btn.has-hover ? #9f75ff : #8B5CF6;
+            border-radius: 10px;
+            animate background { duration: 100ms; }
+            Text {
+                text: "Bắt đầu ghi âm →";
+                font-size: 16px;
+                font-weight: 700;
+                color: white;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Main wizard overlay ───────────────────────────────────────────────────────
+
+export component WizardOverlay inherits Rectangle {
+    // Current step index (0–6)
+    in-out property <int> step: 0;
+    // Provider selected in step 2 (determines branching)
+    in-out property <string> selected-provider: "local-whisper";
+    // Audio device selected in step 1
+    in-out property <string> selected-device: "";
+    // Audio device list (from Rust)
+    in property <[string]> audio-devices;
+    // Source language options + current selection
+    in property <[string]> source-language-options;
+    in-out property <string> selected-source-language: "vi";
+    // Target mode options + current selection
+    in property <[string]> target-mode-options;
+    in-out property <string> selected-target-mode: "Dịch sang tiếng Anh";
+    // API key input (cleared on step change for security)
+    in-out property <string> api-key-text: "";
+    // API key test result: "" = untested, "ok" = pass, else = Vietnamese error
+    in property <string> api-key-test-result: "";
+    // True while the async WS test is in flight
+    in property <bool> api-key-testing: false;
+    // True if at least one model is present on disk (enables Next on step 4).
+    // ModelDownloadCard is rendered by app-window.slint (step 4 content injected
+    // from the parent because DownloadProgress type lives in app-window.slint).
+    in property <bool> model-ready: false;
+
+    // Wizard navigation callbacks (handled by Rust in main.rs)
+    callback next();
+    callback back();
+    callback skip();       // Step 3 only: skip API key
+    callback complete();   // Step 6 CTA: mark complete + switch to main
+
+    // API key operations
+    callback test-api-key(string, string);    // (provider, key)
+    callback save-api-key(string, string);    // (provider, key) — stores in keychain
+
+    // Language / source change in wizard (mirrors live config update)
+    callback source-language-changed(string);
+    callback target-mode-changed(string);
+
+    background: #0A0A0A;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // ── Wizard header ──
+        Rectangle {
+            height: 56px;
+            background: #0d0721;
+            border-width: 0;
+            // Bottom hairline
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                width: parent.width;
+                background: #2a1d4a;
+            }
+
+            HorizontalLayout {
+                padding-left: 24px;
+                padding-right: 24px;
+                alignment: space-between;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 6px;
+                        background: #2a1d4a;
+                        y: (parent.height - self.height) / 2;
+                        Text {
+                            text: "V";
+                            font-size: 13px;
+                            font-weight: 800;
+                            color: #8B5CF6;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: "Vọng AI Recorder · Thiết lập ban đầu";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: #A3A3A3;
+                        vertical-alignment: center;
+                    }
+                }
+
+                StepIndicator {
+                    current: step;
+                    total: 7;
+                }
+            }
+        }
+
+        // ── Step content area ──
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding: 40px;
+                alignment: start;
+
+                if step == 0: WelcomeStep { }
+
+                if step == 1: AudioSourceStep {
+                    devices: audio-devices;
+                    selected-device: selected-device;
+                    device-selected(v) => { selected-device = v; }
+                }
+
+                if step == 2: ProviderStep {
+                    selected-provider <=> selected-provider;
+                }
+
+                if step == 3: ApiKeyStep {
+                    provider: selected-provider;
+                    api-key-input <=> api-key-text;
+                    test-result: api-key-test-result;
+                    testing: api-key-testing;
+                    test-connection => { root.test-api-key(selected-provider, api-key-text); }
+                }
+
+                // Step 4 (Model Download) content is injected by app-window.slint.
+                // ModelDownloadCard and DownloadProgress are defined there and cannot
+                // be referenced from this imported file. The wizard header + footer
+                // still render; content area shows nothing (app-window overlays the card).
+                if step == 4: VerticalBox {
+                    spacing: 16px;
+                    padding: 0px;
+
+                    Text {
+                        text: "Tải model Whisper";
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: #FAFAFA;
+                    }
+                    Text {
+                        text: "Chọn model phù hợp với máy tính của bạn. Base được khuyến nghị cho hầu hết người dùng — cân bằng giữa tốc độ và độ chính xác.";
+                        font-size: 14px;
+                        color: #A3A3A3;
+                        wrap: word-wrap;
+                    }
+                    // ModelDownloadCard rendered by parent (app-window.slint) below this overlay.
+                    // Spacer so the header + footer remain visible.
+                    Rectangle { height: 300px; background: transparent; }
+
+                    if model-ready: WizardCard {
+                        VerticalBox {
+                            padding: 12px;
+                            HorizontalBox {
+                                spacing: 6px;
+                                alignment: start;
+                                Text { text: "✅"; font-size: 13px; }
+                                Text {
+                                    text: "Model đã sẵn sàng!";
+                                    font-size: 13px;
+                                    color: #4ADE80;
+                                }
+                            }
+                        }
+                    }
+                    if !model-ready: WizardCard {
+                        VerticalBox {
+                            padding: 12px;
+                            Text {
+                                text: "⏳  Tải model xong thì nút \"Tiếp theo\" sẽ bật. Model được lưu vào máy — không cần tải lại lần sau.";
+                                font-size: 12px;
+                                color: #737373;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                if step == 5: LanguageStep {
+                    source-options: source-language-options;
+                    selected-source <=> selected-source-language;
+                    target-options: target-mode-options;
+                    selected-target <=> selected-target-mode;
+                    source-changed(v) => { root.source-language-changed(v); }
+                    target-changed(v) => { root.target-mode-changed(v); }
+                }
+
+                if step == 6: DoneStep {
+                    provider: selected-provider;
+                    source-language: selected-source-language;
+                    audio-device: selected-device;
+                    start-recording => { root.complete(); }
+                }
+            }
+        }
+
+        // ── Footer: Back / Skip / Next ──
+        Rectangle {
+            height: 72px;
+            background: #0d0721;
+            // Top hairline
+            Rectangle {
+                y: 0;
+                height: 1px;
+                width: parent.width;
+                background: #2a1d4a;
+            }
+
+            HorizontalLayout {
+                padding-left: 40px;
+                padding-right: 40px;
+                alignment: space-between;
+
+                // Back button (hidden on step 0 and step 6)
+                if step > 0 && step < 6: back-btn := TouchArea {
+                    width: 100px;
+                    height: 40px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.back(); }
+                    Rectangle {
+                        background: back-btn.has-hover ? #262626 : transparent;
+                        border-radius: 8px;
+                        border-width: back-btn.has-hover ? 1px : 0px;
+                        border-color: #404040;
+                        animate background { duration: 100ms; }
+                        Text {
+                            text: "← Trở lại";
+                            font-size: 14px;
+                            color: #A3A3A3;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                // Spacer when Back hidden
+                if step == 0 || step == 6: Rectangle { width: 100px; background: transparent; }
+
+                // Skip button (step 3 only — API key can be skipped)
+                if step == 3: skip-btn := TouchArea {
+                    width: 100px;
+                    height: 40px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => { root.skip(); }
+                    Rectangle {
+                        background: skip-btn.has-hover ? #262626 : transparent;
+                        border-radius: 8px;
+                        border-width: skip-btn.has-hover ? 1px : 0px;
+                        border-color: #404040;
+                        animate background { duration: 100ms; }
+                        Text {
+                            text: "Bỏ qua";
+                            font-size: 14px;
+                            color: #737373;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if step != 3: Rectangle { width: 100px; background: transparent; }
+
+                // Next button (hidden on step 6 — step 6 has its own CTA)
+                if step < 6: next-btn := TouchArea {
+                    width: 140px;
+                    height: 40px;
+                    y: (parent.height - self.height) / 2;
+                    // Disable Next on Model step until model is ready
+                    enabled: step == 4 ? model-ready : true;
+                    clicked => {
+                        if step == 3 && api-key-text != "" {
+                            root.save-api-key(selected-provider, api-key-text);
+                        }
+                        root.next();
+                    }
+                    Rectangle {
+                        background: next-btn.enabled
+                            ? (next-btn.has-hover ? #9f75ff : #8B5CF6)
+                            : #2a1d4a;
+                        border-radius: 8px;
+                        opacity: next-btn.enabled ? 1.0 : 0.5;
+                        animate background { duration: 100ms; }
+                        Text {
+                            text: step == 5 ? "Tiếp tục →" : "Tiếp theo →";
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: next-btn.enabled ? white : #737373;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -33,10 +33,11 @@ pub struct StreamOpts {
 /// UI updates the config but requires a restart to take effect (hot-swap of
 /// the running stream is not supported yet — would need to tear down the
 /// active provider task and re-spawn).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderMode {
     /// Local Whisper.cpp via `WhisperLocalProvider`. Free, runs on GPU/CPU,
     /// offline. Batches per utterance — best partial granularity ~1.5 s.
+    #[default]
     LocalWhisper,
     /// Soniox WebSocket via `SonioxProvider`. BYOK ($0.003/min). True
     /// word-level streaming partials, language ID, optional translation.
@@ -45,12 +46,6 @@ pub enum ProviderMode {
     /// Provider implementation pending — selecting this returns an error
     /// at startup until the provider lands.
     OpenAIRealtime,
-}
-
-impl Default for ProviderMode {
-    fn default() -> Self {
-        Self::LocalWhisper
-    }
 }
 
 impl ProviderMode {
@@ -75,7 +70,11 @@ impl ProviderMode {
 }
 
 /// What the second Whisper pass (the "Bản dịch" column) should produce.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Default is `TranslateToEnglish` — produces real English translation regardless
+/// of input language. Pre-fix default `Hint("vi")` produced phonetic transliteration
+/// garbage on English source ("khá tệ hại" complaint).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum TargetMode {
     /// Don't run pass B. UI just shows "Bản gốc" populated; "Bản dịch" stays
     /// in `translation_done=true` empty state ("(không có)").
@@ -83,6 +82,7 @@ pub enum TargetMode {
     /// Run Whisper with `set_translate(true)` — the model's only true
     /// cross-lingual translation, target language is always English.
     /// Use this when the user wants English subtitles for any source.
+    #[default]
     TranslateToEnglish,
     /// Run Whisper with `set_language(Some(code))` and `set_translate(false)`.
     /// Real transcription of the source forced into the named language —
@@ -91,15 +91,6 @@ pub enum TargetMode {
     /// Useful when user wants a denoised/normalized version of the source
     /// (e.g., source is Vietnamese → target also Vietnamese for cleanup).
     Hint(String),
-}
-
-impl Default for TargetMode {
-    fn default() -> Self {
-        // Default — produces real English translation regardless of input
-        // language. Pre-fix default (Hint("vi")) was the source of the
-        // "khá tệ hại" complaint when speaker used English.
-        Self::TranslateToEnglish
-    }
 }
 
 /// Live STT configuration that can change between utterances.

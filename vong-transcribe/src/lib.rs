@@ -46,6 +46,7 @@
 mod api_key;
 mod error;
 mod events;
+pub mod model_dl;
 mod openai_realtime;
 mod reconnect;
 mod soniox;
@@ -56,6 +57,10 @@ mod whisper_local;
 pub use api_key::ApiKey;
 pub use error::SttError;
 pub use events::TranscriptEvent;
+pub use model_dl::{
+    cleanup_stale_parts, download_model, find_spec, parse_lfs_pointer, DlError, DownloadProgress,
+    DownloadState, ModelSpec, MODELS,
+};
 pub use openai_realtime::OpenAIRealtimeProvider;
 pub use reconnect::ExponentialBackoff;
 pub use soniox::SonioxProvider;

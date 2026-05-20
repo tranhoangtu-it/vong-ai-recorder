@@ -5,6 +5,71 @@ versioning follows [SemVer](https://semver.org/) (pre-1.0 = breaking changes pos
 
 ## [Unreleased]
 
+Sprint 1 — production v1.0-beta.1 readiness. Targets first downloadable beta
+for ~20-30 Vietnamese testers via unsigned MSI installer + landing page.
+
+### Added
+
+- **Phase 1 — Installer** (`vong-app/wix/main.wxs`, `[package.metadata.wix]`).
+  Per-user MSI via `cargo-wix` 0.3.9 + WiX Toolset v3.14.1. Installs to
+  `%LocalAppData%\Programs\Vong AI Recorder\` — no UAC. Stable UpgradeCode
+  GUID `FFC0DF45-51D5-45F8-A336-A5113CAFC06D` committed so future releases
+  upgrade in place. Code signing cert deferred (SmartScreen warning
+  documented in onboarding wizard + landing page).
+- **Phase 2 — In-app Whisper model downloader** (`vong-transcribe::model_dl`).
+  Streaming HTTP via `reqwest` 0.12 + `sha2` 0.10. Hash fetched live from
+  HuggingFace LFS pointer (never hardcoded). Atomic `.part` → `.bin` rename
+  on hash match. Cancel via `Arc<AtomicBool>` checked per chunk. Auto-cleanup
+  of orphan `.part` files older than 1 hour on app startup. 4-model catalog
+  (tiny / base / small / medium). EMA-smoothed ETA. 17 new tests.
+- **Phase 3 — First-run wizard** (`vong-app/src/wizard.rs`,
+  `vong-app/ui/wizard.slint`). 7-step overlay replacing minimal banner —
+  Welcome → AudioSource → Provider → ApiKey (conditional) → ModelDownload
+  (conditional) → Language → Done. Schema-versioned `onboarded.txt`
+  persistence with crash-resume. Live WS-ping test for Soniox + OpenAI
+  Realtime API keys (5s timeout). Mounts Phase 2 downloader at step 4.
+  25 new tests.
+- **Phase 4 — Landing page** (separate repo `E:\AgentAI\AI Translate\vong-landing\`).
+  Polish of existing 726-line bilingual HTML draft. Adds Download section
+  with SHA-256 placeholders, SmartScreen explainer, 6-screenshot showcase,
+  8-FAQ, OG meta tags, robots.txt, sitemap.xml, vercel.json security
+  headers. Privacy policy rendered to standalone HTML. Initial local commit;
+  user deploys + configures DNS.
+- **Phase 5 — Release pipeline** (`.github/workflows/release.yml`,
+  `.github/r2-setup.md`, `scripts/release-checklist.md`, `scripts/release-r2-cleanup.ps1`).
+  Tag-triggered 4-job pipeline: parallel CPU + Vulkan MSI builds → R2
+  upload (versioned + `latest/` mirror) → draft GitHub Release. SHA-256
+  computed and surfaced in `$GITHUB_STEP_SUMMARY`. Vulkan job is
+  `continue-on-error` (cert/SDK issues never block the CPU release).
+  Dry-run path via `workflow_dispatch` skips upload + release for first
+  pipeline validation.
+- **Phase 6 — Beta launch QA + announcement** (`docs/known-issues-beta.md`,
+  `docs/qa-checklist-beta.md`, `docs/beta-announcement-{vi,en}.md`,
+  `docs/beta-tester-recruitment.md`, `docs/feedback-channels.md`,
+  `scripts/qa-smoke.ps1`). 30-case QA test matrix for clean Win11 VM. 14
+  known issues catalogued (0 blockers, 6 warnings, 8 info). Vietnamese
+  announcement draft (~500 words, hashtag-ready). English short version
+  (~180 words) for international dev channels. Feedback channel
+  recommendation: Google Form (primary) + Telegram (~10 power testers) +
+  GitHub Discussions tertiary. PowerShell smoke script with 8 automated
+  checks for post-install validation.
+
+### Changed
+
+- **Workspace version**: `0.1.0-alpha.1` → `0.1.0-beta.1`. Cascades to all
+  5 crates via `version.workspace = true`.
+- **Slint UI**: `OnboardingBanner` component removed in favor of full
+  wizard overlay. `current-view` now routes `wizard` | `main` | `settings`.
+- **`vong-transcribe::traits`**: `ProviderMode` + `TargetMode` now use
+  `#[derive(Default)]` with `#[default]` markers (fixes `derivable_impls`
+  clippy warning that was blocking CI gate).
+
+### Fixed
+
+- Pre-existing clippy warnings that would have blocked CI `-D warnings`
+  gate after Phase 2 landed (`&PathBuf` → `&Path`, doc list item
+  indentation in `default_stream_opts`).
+
 ## [0.1.0-alpha.1] — 2026-05-17
 
 First Windows alpha. End-to-end Vietnamese-first transcription pipeline running

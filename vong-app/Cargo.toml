@@ -27,6 +27,12 @@ tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"        # Production crash log to file (GUI app stderr invisible)
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+# Phase 3 wizard — API key test (WS ping to Soniox / OpenAI).
+# Same pinned versions as vong-transcribe to share a single compiled copy.
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 
 # Phase 1 + 3 + 4 + 6 wired: mic capture → VAD → Whisper local STT → SQLite storage.
 vong-audio = { workspace = true }
@@ -43,6 +49,15 @@ muda = "0.19"           # Menu items used by tray-icon
 
 # Future phases:
 # vong-ui = { workspace = true }
+
+[package.metadata.wix]
+# cargo-wix configuration — do not remove this section.
+# UpgradeCode MUST remain stable across all releases.
+# See: wix/main.wxs for the committed template.
+upgrade-guid = "FFC0DF45-51D5-45F8-A336-A5113CAFC06D"
+path-guid = "0F4C24A4-878D-477B-A38D-DBFAE84D5AB8"
+license = false
+eula = false
 
 [build-dependencies]
 slint-build = "1.7"

@@ -41,5 +41,12 @@ base64 = "0.22"           # OpenAI Realtime input_audio_buffer.append uses base6
 whisper-rs = { version = "0.16", default-features = false }
 directories = "6"         # Cross-platform AppData / model storage discovery
 
+# Phase 2 — In-app Whisper model downloader
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+sha2 = "0.10"
+
 # Internal: shared types (Utterance struct from audio crate)
 vong-audio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

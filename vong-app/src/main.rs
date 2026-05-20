@@ -18,11 +18,12 @@
 
 mod log_init;
 mod tray;
+mod wizard;
 
 use cpal::traits::DeviceTrait;
 use rtrb::RingBuffer;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -38,8 +39,9 @@ use vong_storage::{
     SearchHit, Session,
 };
 use vong_transcribe::{
-    ApiKey, LiveConfigHandle, OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts,
-    StreamingTranscriber, TargetMode, TranscriptEvent, WhisperLocalProvider,
+    model_dl, ApiKey, DlError, DownloadProgress as DlProgress, DownloadState, LiveConfigHandle,
+    OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts, StreamingTranscriber,
+    TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
 
 slint::include_modules!();
@@ -153,6 +155,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _log_guard = log_init::init_logging();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Vọng starting");
 
+    // Clean up orphaned .part files from prior crashed/cancelled downloads.
+    // Runs synchronously before UI init — takes <1 ms on an empty models dir.
+    let models_dir = resolve_models_dir();
+    let cleaned = model_dl::cleanup_stale_parts(&models_dir);
+    if cleaned > 0 {
+        tracing::info!(stale_parts_cleaned = cleaned, "startup: removed stale model part files");
+    }
+
     let ui = AppWindow::new()?;
 
     // Audio-source picker: enumerate devices + populate dropdown.
@@ -165,18 +175,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     populate_provider_picker(&ui);
     wire_provider_picker_callbacks(&ui);
 
-    // First-launch onboarding banner. On dismiss, write marker file so it doesn't
-    // re-appear next time. Skip the banner entirely if the file already exists.
-    if !onboarding_marker_exists() {
-        ui.set_onboarding_visible(true);
+    // ── First-run wizard startup detection ────────────────────────────────────
+    // Read wizard progress from onboarded.txt. If incomplete or absent, show the
+    // wizard overlay. If already complete (including legacy alpha marker files),
+    // skip straight to the main view.
+    {
+        let progress = wizard::read_progress();
+        let (initial_view, initial_step) = match progress {
+            wizard::WizardProgress::Complete => ("main", 0i32),
+            wizard::WizardProgress::NotStarted => ("wizard", 0i32),
+            wizard::WizardProgress::Resume(idx) => {
+                // Resume at last_completed + 1, clamped to step 6
+                let next = (idx + 1).min(6);
+                tracing::info!(
+                    resume_step = next,
+                    "wizard: resuming from last completed step"
+                );
+                ("wizard", next as i32)
+            }
+        };
+        ui.set_current_view(slint::SharedString::from(initial_view));
+        ui.set_wizard_step(initial_step);
+        tracing::info!(
+            view = initial_view,
+            step = initial_step,
+            "startup: initial view determined from wizard progress"
+        );
     }
-    ui.on_dismiss_onboarding(move || {
-        if let Err(e) = mark_onboarded() {
-            tracing::warn!(error = ?e, "failed to write onboarding marker — banner may re-appear");
-        } else {
-            tracing::info!("onboarding marker written — banner dismissed");
-        }
-    });
+
+    // Wire wizard navigation callbacks.
+    wire_wizard_callbacks(&ui, &models_dir);
 
     let app_started_at = std::time::Instant::now();
 
@@ -200,7 +228,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // ── Model download shared state (Phase 2) ─────────────────────────────
+    // `dl_progress` is read by the Slint 30 Hz timer and written by the
+    // download task. `dl_cancel` is set by the cancel button callback.
+    // Phase 3 wizard will mount `ModelDownloadCard` and wire these handles.
+    let dl_progress: Arc<Mutex<DlProgress>> = Arc::new(Mutex::new(DlProgress::default()));
+    let dl_cancel: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Wire start/cancel callbacks that Phase 3 will invoke from the wizard.
+    // They are registered here so the Slint property bridge is alive for the
+    // full app lifetime; the wizard just calls `ui.on_start_model_download`.
+    wire_model_download_callbacks(&ui, dl_progress.clone(), dl_cancel.clone(), &models_dir);
+
+    // ── Download-progress + model-ready mirror timer ──────────────────────────
+    // Pushes `dl_progress` into `ui.download-progress` at 30 Hz (same cadence as
+    // the audio-pipeline timer in init_audio). Also checks whether a model is
+    // present on disk for the wizard step-4 "Next" enable gate.
+    let ui_weak_dl = ui.as_weak();
+    let dl_progress_timer = dl_progress.clone();
+    let models_dir_timer = models_dir.clone();
+    let _dl_timer = {
+        let t = slint::Timer::default();
+        t.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(33),
+            move || {
+                let Some(ui) = ui_weak_dl.upgrade() else { return };
+
+                // Mirror download progress struct into Slint property.
+                if let Ok(p) = dl_progress_timer.lock() {
+                    ui.set_download_progress(DownloadProgress {
+                        state: slint::SharedString::from(p.state.as_str()),
+                        bytes_downloaded: p.bytes.min(i32::MAX as u64) as i32,
+                        total_bytes: p.total.unwrap_or(0).min(i32::MAX as u64) as i32,
+                        eta_secs: p.eta_secs.unwrap_or(0) as i32,
+                        percent: p.percent(),
+                        error_message: slint::SharedString::from(&p.error_msg),
+                    });
+                }
+
+                // model-ready: check whether any ggml-*.bin file exists in models dir.
+                let ready = models_dir_timer
+                    .read_dir()
+                    .ok()
+                    .map(|mut entries| {
+                        entries.any(|e| {
+                            e.ok()
+                                .and_then(|e| e.file_name().into_string().ok())
+                                .map(|n| n.starts_with("ggml-") && n.ends_with(".bin"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                ui.set_model_ready(ready);
+            },
+        );
+        t
+    };
+
     ui.run()?;
+    // Keep _dl_timer alive until here (timer drops → stops).
+    drop(_dl_timer);
 
     // Finalize the session row before tearing down the runtime so end_ts/duration
     // get written. This is best-effort — if the DB lock can't be acquired (e.g.
@@ -900,32 +989,158 @@ fn sanitize_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-// ---- Onboarding marker (Phase 7) ------------------------------------------
+// ---- Wizard callbacks (Phase 3) -------------------------------------------
 
-/// Path to first-launch marker. Existence = user dismissed the welcome banner.
-fn onboarding_marker_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder")
-        .map(|d| d.config_dir().join("onboarded.txt"))
-}
+/// Wire all wizard-related Slint callbacks onto `ui`.
+///
+/// Called once from `main()` after `AppWindow::new()`. All heavy async work
+/// (API key test) is dispatched via `std::thread::spawn` + one-shot tokio
+/// runtime to avoid blocking the Slint event loop.
+fn wire_wizard_callbacks(ui: &AppWindow, _models_dir: &Path) {
+    // ── Next ─────────────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_next(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let current = ui.get_wizard_step() as usize;
+            let provider = ui.get_wizard_provider().to_string();
 
-fn onboarding_marker_exists() -> bool {
-    onboarding_marker_path()
-        .map(|p| p.exists())
-        .unwrap_or(false)
-}
+            // Persist the step we just completed.
+            if let Some(step) = wizard::WizardStep::from_index(current) {
+                if let Err(e) = wizard::mark_step_done(step) {
+                    tracing::warn!(
+                        error = ?e,
+                        step = ?step,
+                        "wizard: failed to persist step — continuing anyway"
+                    );
+                }
+                tracing::info!(step = current, "wizard step complete");
+            }
 
-fn mark_onboarded() -> std::io::Result<()> {
-    let Some(path) = onboarding_marker_path() else {
-        return Err(std::io::Error::other("ProjectDirs unavailable"));
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+            let next = wizard::compute_next_step_index(current, &provider);
+            ui.set_wizard_step(next as i32);
+        });
     }
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    std::fs::write(&path, format!("{}\n", timestamp))
+
+    // ── Back ─────────────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_back(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let current = ui.get_wizard_step() as usize;
+            let provider = ui.get_wizard_provider().to_string();
+            // Back does NOT remove lines from onboarded.txt — append-only.
+            let prev = wizard::compute_prev_step_index(current, &provider);
+            ui.set_wizard_step(prev as i32);
+            tracing::info!(from_step = current, to_step = prev, "wizard: back navigation");
+        });
+    }
+
+    // ── Skip (Step 3 — API key) ──────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_skip(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if let Err(e) = wizard::mark_api_key_skipped() {
+                tracing::warn!(error = ?e, "wizard: failed to persist api_key.skipped");
+            }
+            tracing::info!("wizard: api key step skipped");
+            // ApiKey (3) → Language (5) regardless of provider (skip goes past model too).
+            ui.set_wizard_step(5);
+        });
+    }
+
+    // ── Complete (Step 6 CTA) ────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_complete(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            if let Err(e) = wizard::mark_step_done(wizard::WizardStep::Done) {
+                tracing::warn!(error = ?e, "wizard: failed to persist done step");
+            }
+            if let Err(e) = wizard::mark_complete() {
+                tracing::warn!(error = ?e, "wizard: failed to write step.complete");
+            }
+            tracing::info!("wizard: complete — switching to main view");
+            ui.set_current_view(slint::SharedString::from("main"));
+        });
+    }
+
+    // ── Test API key ─────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_test_api_key(move |provider, key| {
+            let ui_weak = ui_weak.clone();
+            let provider = provider.to_string();
+            let key = key.to_string();
+
+            // Mark as testing (disables the button immediately).
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_api_key_testing(true);
+                ui.set_api_key_test_result(slint::SharedString::from(""));
+            }
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("wizard api key test runtime");
+                let result = rt.block_on(wizard::test_api_key(&provider, &key));
+                let result_str = match result {
+                    Ok(()) => "ok".to_string(),
+                    Err(msg) => msg,
+                };
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_api_key_testing(false);
+                        ui.set_api_key_test_result(slint::SharedString::from(result_str));
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // ── Save API key ─────────────────────────────────────────────────────────
+    {
+        ui.on_wizard_save_api_key(move |provider, key| {
+            let provider = provider.to_string();
+            let key = key.to_string();
+            match wizard::save_api_key(&provider, &key) {
+                Ok(()) => tracing::info!(
+                    provider = %provider,
+                    key_len = key.len(),
+                    "wizard: API key stored in Credential Manager"
+                ),
+                Err(e) => tracing::warn!(
+                    provider = %provider,
+                    error = %e,
+                    "wizard: failed to store API key"
+                ),
+            }
+        });
+    }
+
+    // ── Language changes from wizard (update live config immediately) ─────────
+    // Forward wizard source/target picks to the same callbacks wired by
+    // wire_language_picker_callbacks (Settings screen). Slint generates
+    // `invoke_*` for user-defined callbacks.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_source_changed(move |lang| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_source_language_changed(lang);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_target_changed(move |mode| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_target_mode_changed(mode);
+            }
+        });
+    }
 }
 
 // ---- Provider mode persistence (which STT engine to run) -------------------
@@ -1349,7 +1564,7 @@ fn format_search_hit_line(h: &SearchHit) -> String {
 }
 
 /// Default `StreamOpts` used by every provider. Per-utterance source language
-/// + target mode actually come from `LiveSttConfig` (mutated by UI), but
+/// and target mode actually come from `LiveSttConfig` (mutated by UI), but
 /// `language_hint` here seeds the live config the first time the provider
 /// runs and is also what cloud providers like Soniox use as a startup hint.
 fn default_stream_opts() -> StreamOpts {
@@ -1689,5 +1904,112 @@ fn spawn_utterance_counter(
                 .store(utt.duration_ms, Ordering::Relaxed);
         }
         tracing::info!("utterance counter exited (channel closed)");
+    });
+}
+
+// ── Phase 2: model download helpers ───────────────────────────────────────
+
+/// Return the models directory where Whisper GGML files are stored.
+///
+/// Matches case 3 of `WhisperLocalProvider::resolve_default_model_path()`:
+/// `%LOCALAPPDATA%\Vong\Vong AI Recorder\data\models\`
+fn resolve_models_dir() -> PathBuf {
+    if let Some(dirs) = directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder") {
+        return dirs.data_local_dir().join("models");
+    }
+    PathBuf::from("models")
+}
+
+/// Wire the `on_start_model_download` / `on_cancel_model_download` callbacks
+/// on the Slint `AppWindow`. Phase 3 wizard calls these from its UI.
+///
+/// The download runs on the existing tokio runtime embedded in `AudioBundle`.
+/// Since the runtime may not exist when there's no audio (edge case), we
+/// spin up a lightweight one-shot tokio task via `tokio::runtime::Handle`
+/// captured from the audio bundle's runtime — but `wire_model_download_callbacks`
+/// is called before `init_audio` returns the bundle so we need a standalone
+/// approach. We use `std::thread::spawn` + a fresh one-shot tokio runtime
+/// so the download doesn't block the Slint event loop.
+fn wire_model_download_callbacks(
+    ui: &AppWindow,
+    dl_progress: Arc<Mutex<DlProgress>>,
+    dl_cancel: Arc<std::sync::atomic::AtomicBool>,
+    models_dir: &Path,
+) {
+    let models_dir = models_dir.to_path_buf();
+    let dl_cancel_for_start = dl_cancel.clone();
+    let dl_progress_for_start = dl_progress.clone();
+
+    ui.on_start_model_download(move |name| {
+        let name = name.to_string();
+        let progress = dl_progress_for_start.clone();
+        let cancel = dl_cancel_for_start.clone();
+        let dir = models_dir.clone();
+
+        // Reset cancel flag for a fresh attempt.
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Spawn on a background thread with its own minimal tokio runtime so
+        // the download doesn't block the Slint event loop.
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("download runtime");
+            rt.block_on(async move {
+                match model_dl::download_model(&name, &dir, progress.clone(), cancel).await {
+                    Ok(_) => {
+                        tracing::info!(model_name = %name, state_transition = "done",
+                            "model download complete");
+                    }
+                    Err(DlError::Cancelled) => {
+                        tracing::info!(model_name = %name, state_transition = "cancelled",
+                            "model download cancelled");
+                    }
+                    Err(e) => {
+                        let msg = e.user_message_vi();
+                        tracing::warn!(model_name = %name, state_transition = "error",
+                            "model download failed");
+                        if let Ok(mut p) = progress.lock() {
+                            p.state = DownloadState::Error;
+                            p.error_msg = msg;
+                        }
+                    }
+                }
+            });
+        });
+    });
+
+    ui.on_cancel_model_download(move || {
+        dl_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(state_transition = "cancel_requested", "model download cancel requested");
+    });
+}
+
+/// Public entry point for Phase 3 wizard to trigger a model download
+/// programmatically (e.g. from the "Download" button in `ModelDownloadStep`).
+///
+/// Wraps `model_dl::download_model` with the shared progress + cancel handles
+/// already wired to the Slint timer. Phase 3 calls this after obtaining
+/// the `dl_progress` / `dl_cancel` handles from the app state it receives.
+pub fn start_model_download(
+    name: &str,
+    models_dir: &std::path::Path,
+    progress: Arc<Mutex<DlProgress>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let name = name.to_string();
+    let dir = models_dir.to_path_buf();
+
+    cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("download runtime");
+        rt.block_on(async move {
+            let _ = model_dl::download_model(&name, &dir, progress, cancel).await;
+        });
     });
 }

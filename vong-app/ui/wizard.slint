@@ -1,14 +1,15 @@
-// First-run wizard overlay — 7-step onboarding flow for Vọng AI Recorder.
+// First-run wizard overlay — 8-step onboarding flow for Vọng AI Recorder.
 //
 // Mounted by AppWindow when current-view == "wizard".
 // Steps:
-//   0  WelcomeStep     — brand intro + privacy promise
-//   1  AudioSourceStep — pick mic / loopback device
-//   2  ProviderStep    — Whisper Local / Soniox / OpenAI
-//   3  ApiKeyStep      — API key entry + test (cloud providers only)
+//   0  WelcomeStep       — brand intro + privacy promise
+//   1  AudioSourceStep   — pick mic / loopback device
+//   2  ProviderStep      — Whisper Local / Soniox / OpenAI
+//   3  ApiKeyStep        — API key entry + test (cloud providers only)
 //   4  ModelDownloadStep — download Whisper model (LocalWhisper only)
-//   5  LanguageStep    — source language + target mode
-//   6  DoneStep        — recap + CTA
+//   5  LanguageStep      — source language + target mode
+//   6  CrashReportStep   — opt-in anonymous crash reporting (Phase 9)
+//   7  DoneStep          — recap + CTA
 //
 // Design tokens mirror app-window.slint Tokens global.
 // All copy is in Vietnamese (NF1).
@@ -40,9 +41,9 @@ export component StepIndicator inherits HorizontalLayout {
     spacing: 6px;
     alignment: center;
 
-    // Dots rendered inline for each of the 7 steps.
+    // Dots rendered inline for each of the 8 steps.
     // Slint doesn't support dynamic `for i in 0..total` over non-model arrays,
-    // so we hard-code 7 dots (total is always 7 in this wizard).
+    // so we hard-code 8 dots (total is always 8 in this wizard after Phase 9).
     StepDot { active: current == 0; done: current > 0; }
     StepDot { active: current == 1; done: current > 1; }
     StepDot { active: current == 2; done: current > 2; }
@@ -50,6 +51,7 @@ export component StepIndicator inherits HorizontalLayout {
     StepDot { active: current == 4; done: current > 4; }
     StepDot { active: current == 5; done: current > 5; }
     StepDot { active: current == 6; done: current > 6; }
+    StepDot { active: current == 7; done: current > 7; }
 }
 
 // ── Shared wizard card wrapper ────────────────────────────────────────────────
@@ -575,7 +577,159 @@ component LanguageStep inherits VerticalBox {
     }
 }
 
-// ── Step 6: Done ──────────────────────────────────────────────────────────────
+// ── Step 6: Crash Report ─────────────────────────────────────────────────────
+
+component CrashReportOptionCard inherits Rectangle {
+    in property <string> label;
+    in property <string> sublabel;
+    in property <bool> selected;
+    callback clicked();
+
+    background: selected ? #1e1045 : #171717;
+    border-radius: 10px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? #8B5CF6 : #404040;
+    animate border-color { duration: 120ms; }
+    animate background { duration: 120ms; }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalBox {
+        padding: 16px;
+        spacing: 12px;
+        alignment: start;
+
+        // Selection dot
+        Rectangle {
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+            border-width: selected ? 0px : 2px;
+            border-color: #404040;
+            background: selected ? #8B5CF6 : transparent;
+            y: (parent.height - self.height) / 2;
+            animate background { duration: 120ms; }
+
+            if selected: Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: white;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+
+        VerticalBox {
+            spacing: 3px;
+            alignment: center;
+            Text {
+                text: root.label;
+                font-size: 15px;
+                font-weight: 700;
+                color: selected ? #FAFAFA : #A3A3A3;
+            }
+            Text {
+                text: root.sublabel;
+                font-size: 12px;
+                color: #737373;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+component CrashReportStep inherits VerticalBox {
+    // Current consent selection — false by default (opt-in, not opt-out).
+    in-out property <bool> consent: false;
+    callback consent-changed(bool);
+
+    spacing: 16px;
+    padding: 0px;
+
+    Text {
+        text: "Báo cáo lỗi (tùy chọn)";
+        font-size: 20px;
+        font-weight: 700;
+        color: #FAFAFA;
+    }
+    Text {
+        text: "Khi Vọng gặp lỗi nghiêm trọng, chúng tôi muốn biết để có thể sửa. Bạn có muốn gửi crash report ẩn danh không?";
+        font-size: 14px;
+        color: #A3A3A3;
+        wrap: word-wrap;
+    }
+
+    // Privacy details card
+    WizardCard {
+        VerticalBox {
+            padding: 14px;
+            spacing: 8px;
+
+            HorizontalBox {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "🔒"; font-size: 14px; vertical-alignment: center; }
+                Text {
+                    text: "Chỉ gửi khi có lỗi nghiêm trọng";
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: #FAFAFA;
+                    vertical-alignment: center;
+                }
+            }
+            Text {
+                text: "• KHÔNG bao gồm nội dung phiên ghi hoặc audio";
+                font-size: 13px;
+                color: #A3A3A3;
+            }
+            Text {
+                text: "• KHÔNG bao gồm khoá API hay thông tin cá nhân";
+                font-size: 13px;
+                color: #A3A3A3;
+            }
+            Text {
+                text: "• Chỉ gửi: file + dòng code lỗi, phiên bản OS, phiên bản Vọng";
+                font-size: 13px;
+                color: #A3A3A3;
+            }
+            Text {
+                text: "• Có thể bật / tắt bất kỳ lúc nào trong Cài đặt → System";
+                font-size: 12px;
+                color: #737373;
+            }
+        }
+    }
+
+    // Option cards
+    VerticalLayout {
+        spacing: 8px;
+
+        CrashReportOptionCard {
+            label: "Đồng ý — bật báo cáo lỗi ẩn danh";
+            sublabel: "Giúp chúng tôi tìm và sửa lỗi nhanh hơn.";
+            selected: consent;
+            clicked => {
+                consent = true;
+                root.consent-changed(true);
+            }
+        }
+
+        CrashReportOptionCard {
+            label: "Không, cảm ơn";
+            sublabel: "Không gửi bất kỳ dữ liệu nào.";
+            selected: !consent;
+            clicked => {
+                consent = false;
+                root.consent-changed(false);
+            }
+        }
+    }
+}
+
+// ── Step 7: Done ──────────────────────────────────────────────────────────────
 
 component DoneStep inherits VerticalBox {
     in property <string> provider;
@@ -681,7 +835,7 @@ component DoneStep inherits VerticalBox {
 // ── Main wizard overlay ───────────────────────────────────────────────────────
 
 export component WizardOverlay inherits Rectangle {
-    // Current step index (0–6)
+    // Current step index (0–7)
     in-out property <int> step: 0;
     // Provider selected in step 2 (determines branching)
     in-out property <string> selected-provider: "local-whisper";
@@ -706,11 +860,17 @@ export component WizardOverlay inherits Rectangle {
     // from the parent because DownloadProgress type lives in app-window.slint).
     in property <bool> model-ready: false;
 
+    // Phase 9: current crash-report consent selection in step 6.
+    // Default false (opt-in, not opt-out). Rust reads this to persist consent.
+    in-out property <bool> crash-report-consent: false;
+    // Fired when user taps "Đồng ý" or "Không" — Rust persists + advances to Done.
+    callback wizard-crash-reporting-changed(bool);
+
     // Wizard navigation callbacks (handled by Rust in main.rs)
     callback next();
     callback back();
     callback skip();       // Step 3 only: skip API key
-    callback complete();   // Step 6 CTA: mark complete + switch to main
+    callback complete();   // Step 7 CTA: mark complete + switch to main
 
     // API key operations
     callback test-api-key(string, string);    // (provider, key)
@@ -773,7 +933,7 @@ export component WizardOverlay inherits Rectangle {
 
                 StepIndicator {
                     current: step;
-                    total: 7;
+                    total: 8;
                 }
             }
         }
@@ -867,7 +1027,16 @@ export component WizardOverlay inherits Rectangle {
                     target-changed(v) => { root.target-mode-changed(v); }
                 }
 
-                if step == 6: DoneStep {
+                // ── Phase 9: Step 6 — Crash Report ──────────────────────────
+                if step == 6: CrashReportStep {
+                    consent <=> crash-report-consent;
+                    consent-changed(v) => {
+                        // Forward to Rust — Rust persists consent + advances to Done.
+                        root.wizard-crash-reporting-changed(v);
+                    }
+                }
+
+                if step == 7: DoneStep {
                     provider: selected-provider;
                     source-language: selected-source-language;
                     audio-device: selected-device;
@@ -893,8 +1062,8 @@ export component WizardOverlay inherits Rectangle {
                 padding-right: 40px;
                 alignment: space-between;
 
-                // Back button (hidden on step 0 and step 6)
-                if step > 0 && step < 6: back-btn := TouchArea {
+                // Back button (hidden on step 0 and step 7 Done)
+                if step > 0 && step < 7: back-btn := TouchArea {
                     width: 100px;
                     height: 40px;
                     y: (parent.height - self.height) / 2;
@@ -914,8 +1083,8 @@ export component WizardOverlay inherits Rectangle {
                         }
                     }
                 }
-                // Spacer when Back hidden
-                if step == 0 || step == 6: Rectangle { width: 100px; background: transparent; }
+                // Spacer when Back hidden (step 0 or step 7 Done)
+                if step == 0 || step == 7: Rectangle { width: 100px; background: transparent; }
 
                 // Skip button (step 3 only — API key can be skipped)
                 if step == 3: skip-btn := TouchArea {
@@ -940,7 +1109,9 @@ export component WizardOverlay inherits Rectangle {
                 }
                 if step != 3: Rectangle { width: 100px; background: transparent; }
 
-                // Next button (hidden on step 6 — step 6 has its own CTA)
+                // Next button (hidden on step 6 CrashReport — it has its own
+                // consent cards that call wizard-crash-reporting-changed, and
+                // hidden on step 7 Done — that step has its own CTA button).
                 if step < 6: next-btn := TouchArea {
                     width: 140px;
                     height: 40px;

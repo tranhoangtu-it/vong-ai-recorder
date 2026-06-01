@@ -36,9 +36,17 @@ pub const DEFAULT_MODEL_FILENAME: &str = "ggml-base.bin";
 /// - `ggml-small.bin` (466 MB) — markedly better VN, slower
 ///
 /// Model loading is done once on construction; inference state is per-utterance.
+/// Context is wrapped in `Mutex<Arc<WhisperContext>>` so `swap_context` can
+/// atomically replace the model for the Recording settings picker without
+/// interrupting any in-flight inference (each utterance captures its own
+/// `Arc` snapshot before the inference task starts).
 pub struct WhisperLocalProvider {
-    ctx: Arc<WhisperContext>,
-    model_label: String,
+    /// Inner context wrapped so swap_context can update it atomically.
+    /// Lock is held only for the duration of an Arc clone (nanoseconds) —
+    /// real inference holds no lock.
+    ctx: Arc<Mutex<Arc<WhisperContext>>>,
+    /// Filename label (e.g. "ggml-base.bin") — shown in the model picker.
+    model_label: Arc<Mutex<String>>,
     /// Live, runtime-mutable STT config (source language + target mode).
     /// The streaming loop re-reads this on every utterance, so the UI can
     /// change language pickers and the very next utterance picks them up
@@ -80,8 +88,8 @@ impl WhisperLocalProvider {
         );
 
         Ok(Self {
-            ctx: Arc::new(ctx),
-            model_label,
+            ctx: Arc::new(Mutex::new(Arc::new(ctx))),
+            model_label: Arc::new(Mutex::new(model_label)),
             live_config: Arc::new(Mutex::new(LiveSttConfig::default())),
         })
     }
@@ -112,14 +120,58 @@ impl WhisperLocalProvider {
         let n_threads = std::thread::available_parallelism()
             .map(|n| n.get() as i32)
             .unwrap_or(4);
+        let ctx = self.ctx_snapshot();
         let start = std::time::Instant::now();
-        let _ = run_inference(&self.ctx, &silence, Some("vi"), false, n_threads)?;
+        let _ = run_inference(&ctx, &silence, Some("vi"), false, n_threads, None)?;
+        let label = self.model_label();
         tracing::info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
-            model = %self.model_label,
+            model = %label,
             "WhisperLocalProvider: warmup complete — first real utterance will use the warm pipeline"
         );
         Ok(())
+    }
+
+    /// Atomically swap the loaded Whisper model.
+    ///
+    /// Loads a new `WhisperContext` from `model_path`, replaces the current
+    /// context, and updates the model label. The old `Arc<WhisperContext>` is
+    /// dropped once all in-flight inference closures that hold a reference to
+    /// it finish — no use-after-free because `Arc` is reference-counted.
+    ///
+    /// Returns `SttError::Config` if the file is missing or the load fails.
+    /// On failure the previous context is retained unchanged.
+    pub fn swap_context(&self, model_path: &Path) -> Result<(), SttError> {
+        if !model_path.exists() {
+            return Err(SttError::Config(format!(
+                "Whisper model file not found at {}",
+                model_path.display()
+            )));
+        }
+        let params = WhisperContextParameters::default();
+        let path_str = model_path.to_string_lossy();
+        let new_ctx = WhisperContext::new_with_params(path_str.as_ref(), params)
+            .map_err(|e| SttError::Config(format!("model swap load failed: {e}")))?;
+        let new_label = model_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".into());
+        *self.ctx.lock().expect("ctx poisoned") = Arc::new(new_ctx);
+        *self.model_label.lock().expect("label poisoned") = new_label.clone();
+        tracing::info!(model = %new_label, "WhisperLocalProvider: context swapped");
+        Ok(())
+    }
+
+    /// Clone the current `Arc<WhisperContext>`. Each utterance task captures its
+    /// own snapshot so a concurrent `swap_context` call only affects subsequent
+    /// utterances, never the one already in flight.
+    fn ctx_snapshot(&self) -> Arc<WhisperContext> {
+        self.ctx.lock().expect("ctx poisoned").clone()
+    }
+
+    /// Return a copy of the currently active model filename (e.g. "ggml-base.bin").
+    pub fn model_label(&self) -> String {
+        self.model_label.lock().expect("label poisoned").clone()
     }
 
     /// Walk the default search ladder and return the first existing path,
@@ -175,7 +227,7 @@ impl StreamingTranscriber for WhisperLocalProvider {
         }
 
         tracing::info!(
-            model = %self.model_label,
+            model = %self.model_label(),
             language_hint = ?opts.language_hint,
             "WhisperLocalProvider: stream started"
         );
@@ -191,25 +243,44 @@ impl StreamingTranscriber for WhisperLocalProvider {
             // Share audio between blocking tasks via Arc to avoid per-pass clones.
             let audio = Arc::new(utt.audio_pcm16_mono_16k);
 
-            // Snapshot the live config — source language + target mode. We do
-            // this PER UTTERANCE so the UI's language pickers take effect
-            // immediately on the next sound the user makes.
+            // Snapshot the live config — source language, target mode, and
+            // dictionary prompt. Done PER UTTERANCE so UI pickers + dictionary
+            // edits take effect immediately on the next sound the user makes.
             let cfg = {
                 let guard = self.live_config.lock().expect("live_config poisoned");
                 guard.clone()
             };
+            // Pre-clone the dictionary prompt (empty string in the common case
+            // when no dictionary is configured — zero-cost).
+            let dict_prompt = cfg.dictionary_prompt.clone();
+
+            // Log only the entry count, never the prompt content (privacy rule).
+            if !dict_prompt.is_empty() {
+                tracing::debug!(
+                    dict_entry_count = cfg.dictionary.len(),
+                    "WhisperLocalProvider: dictionary hint active"
+                );
+            }
 
             if is_partial {
                 // ── Partial: only the fast Pass A, no Pass B, no persist. ──
                 // Drives the real-time "Bản gốc" column. We don't queue many
                 // of these — the VAD only emits one per ~1.5 s of speech.
-                let ctx_a = self.ctx.clone();
+                let ctx_a = self.ctx_snapshot();
                 let audio_a = audio;
                 let event = event_tx.clone();
                 let source_lang = cfg.source_language.clone();
+                let prompt_a = dict_prompt.clone();
                 tokio::spawn(async move {
                     let res = tokio::task::spawn_blocking(move || {
-                        run_inference(&ctx_a, &audio_a, source_lang.as_deref(), false, n_threads)
+                        run_inference(
+                            &ctx_a,
+                            &audio_a,
+                            source_lang.as_deref(),
+                            false,
+                            n_threads,
+                            Some(prompt_a.as_str()),
+                        )
                     })
                     .await;
                     match res {
@@ -236,20 +307,31 @@ impl StreamingTranscriber for WhisperLocalProvider {
             }
 
             // ── Final: pipelined 2-pass — Pass A then Pass B per `target_mode`. ──
-            let ctx_a = self.ctx.clone();
-            let ctx_b = self.ctx.clone();
+            // Each utterance captures its own Arc snapshot. A concurrent
+            // swap_context call only affects the next utterance, not this one.
+            let ctx_a = self.ctx_snapshot();
+            let ctx_b = self.ctx_snapshot();
             let audio_a = audio.clone();
             let audio_b = audio;
             let source_lang = cfg.source_language.clone();
             let target_mode = cfg.target_mode.clone();
             let event_a = event_tx.clone();
             let event_b = event_tx.clone();
+            let prompt_final = dict_prompt.clone();
 
             tokio::spawn(async move {
                 // ── Pass A — source-language transcribe, prioritized for real-time UI feedback ──
                 let sl_for_pass_a = source_lang.clone();
+                let prompt_pass_a = prompt_final.clone();
                 let pass_a = tokio::task::spawn_blocking(move || {
-                    run_inference(&ctx_a, &audio_a, sl_for_pass_a.as_deref(), false, n_threads)
+                    run_inference(
+                        &ctx_a,
+                        &audio_a,
+                        sl_for_pass_a.as_deref(),
+                        false,
+                        n_threads,
+                        Some(prompt_pass_a.as_str()),
+                    )
                 })
                 .await;
 
@@ -296,10 +378,18 @@ impl StreamingTranscriber for WhisperLocalProvider {
                         (String::new(), String::new())
                     }
                     TargetMode::TranslateToEnglish => {
+                        let prompt_b = prompt_final.clone();
                         let res = tokio::task::spawn_blocking(move || {
                             // language=None lets Whisper auto-detect source;
                             // translate=true forces output to English regardless.
-                            run_inference(&ctx_b, &audio_b, None, true, n_threads)
+                            run_inference(
+                                &ctx_b,
+                                &audio_b,
+                                None,
+                                true,
+                                n_threads,
+                                Some(prompt_b.as_str()),
+                            )
                         })
                         .await;
                         let text = match res {
@@ -317,6 +407,7 @@ impl StreamingTranscriber for WhisperLocalProvider {
                     }
                     TargetMode::Hint(code) => {
                         let code_clone = code.clone();
+                        let prompt_b = prompt_final;
                         let res = tokio::task::spawn_blocking(move || {
                             run_inference(
                                 &ctx_b,
@@ -324,6 +415,7 @@ impl StreamingTranscriber for WhisperLocalProvider {
                                 Some(&code_clone),
                                 false,
                                 n_threads,
+                                Some(prompt_b.as_str()),
                             )
                         })
                         .await;
@@ -382,12 +474,19 @@ impl StreamingTranscriber for WhisperLocalProvider {
 /// "Bản dịch" column when the user wants English subtitles; combine with
 /// `language = None` so the source-language identification happens inside
 /// Whisper's translate path. `translate = false` is straight transcription.
+///
+/// `initial_prompt` is an optional vocabulary-hint string that biases Whisper
+/// toward recognizing the listed terms. Built from `LiveSttConfig::dictionary_prompt`.
+/// Empty string and `None` both produce the same behaviour (no hint). Whisper's
+/// hard limit is ~224 tokens; the caller is responsible for staying under that
+/// via `build_whisper_prompt()`.
 fn run_inference(
     ctx: &WhisperContext,
     audio_i16: &[i16],
     language: Option<&str>,
     translate: bool,
     n_threads: i32,
+    initial_prompt: Option<&str>,
 ) -> Result<(String, Option<String>), SttError> {
     let pcm_f32: Vec<f32> = audio_i16.iter().map(|&s| s as f32 / 32768.0).collect();
 
@@ -404,6 +503,15 @@ fn run_inference(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+
+    // Inject dictionary vocabulary hint when present. Whisper uses this as a
+    // soft prior — it biases the language model toward recognizing these terms
+    // but cannot guarantee them. Privacy: never log the prompt string itself.
+    if let Some(prompt) = initial_prompt {
+        if !prompt.is_empty() {
+            params.set_initial_prompt(prompt);
+        }
+    }
 
     state
         .full(params, &pcm_f32)

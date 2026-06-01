@@ -5,8 +5,11 @@ versioning follows [SemVer](https://semver.org/) (pre-1.0 = breaking changes pos
 
 ## [Unreleased]
 
-Sprint 1 — production v1.0-beta.1 readiness. Targets first downloadable beta
-for ~20-30 Vietnamese testers via unsigned MSI installer + landing page.
+Sprint 1 + 2 — production v1.0-beta.1 readiness, then power-user polish.
+Sprint 1 (6 phases): MSI installer, in-app model downloader, first-run
+wizard, landing page, R2 release pipeline, beta QA docs. Sprint 2 (4 phases):
+Recording settings sliders, custom Dictionary, opt-in Sentry crash reporting,
+LLM session summaries (OpenAI gpt-4o-mini).
 
 ### Added
 
@@ -53,6 +56,47 @@ for ~20-30 Vietnamese testers via unsigned MSI installer + landing page.
   recommendation: Google Form (primary) + Telegram (~10 power testers) +
   GitHub Discussions tertiary. PowerShell smoke script with 8 automated
   checks for post-install validation.
+- **Phase 7 — Recording settings: VAD sliders + Whisper model picker**
+  (`vong-app/src/recording_config.rs`, `vong-audio::LiveVadConfig`,
+  `WhisperLocalProvider::swap_context`). Settings -> Recording tab fully
+  wired: 3 sliders (threshold 0.30-0.95, hangover 100-800ms, max_duration
+  3-15s) live-apply via `Arc<Mutex<VadConfig>>` snapshot pattern - next
+  VAD tick picks them up, no restart. Model picker dropdown scans models
+  dir; Switch button triggers background `WhisperContext` re-load with
+  loading overlay. Persists to
+  `%APPDATA%\Vong\Vong AI Recorder\config\recording.json` (atomic write). 12 new tests.
+- **Phase 8 — Dictionary (custom vocabulary)** (`vong-app/src/dictionary.rs`,
+  `vong-transcribe::traits::{DictEntry, DictContext}` +
+  `build_{whisper_prompt,soniox_terms,openai_instructions}` helpers).
+  Settings -> Dictionary tab: up to 100 entries (phrase + context category:
+  Common / Names / Technical) with add / edit / move / delete. Provider-
+  specific injection: Whisper `initial_prompt` (longest phrases first,
+  ~200 tokens), Soniox `context.terms` array, OpenAI Realtime
+  `session.update.instructions`. Persists to
+  `%APPDATA%\Vong\Vong AI Recorder\config\dictionary.json`. Whisper picks up
+  live; Soniox / OpenAI require next stream start (UI hint). Privacy: phrase
+  content never logged - only entry counts. 29 new tests.
+- **Phase 9 — Crash reporting opt-in (Sentry)** (`vong-app/src/sentry_init.rs`,
+  `vong-app/src/wizard.rs` extended). Sentry 0.34 + sentry-tracing bridged
+  into existing tracing subscriber. Default OFF - explicit consent: new
+  wizard step `CrashReport` between Language and Done (Sprint 1 alpha users
+  who already completed wizard stay complete) + Settings -> System toggle.
+  `before_send` scrubber: drops events whose fields contain transcript /
+  audio / phrase / dictionary_entry / api_key / password / model_path,
+  truncates message bodies to 200 chars, IP stripped. Hardcoded DSN
+  placeholder `REPLACE-ME-WITH-VONG-OWNED-DSN` - user must create Sentry
+  project + paste real DSN pre-tag. Consent persists to
+  `%APPDATA%\Vong\Vong AI Recorder\config\sentry.txt`. 30 new tests.
+- **Phase 10 — Session summaries (LLM end-of-session)**
+  (`vong-app/src/{autosummary,summary_runner}.rs`,
+  `vong-transcribe/src/summary.rs`). On Stop / app close, spawn background
+  task that fetches transcript -> builds Vietnamese prompt -> calls OpenAI
+  `gpt-4o-mini` chat completions reusing the `openai-realtime` keychain key
+  -> persists to existing `summaries` table (Phase 6 schema). Retry once on
+  429/5xx (honors `retry-after`); regenerate capped at 3x. Settings -> System
+  toggle (default ON when key exists). Cost ~$0.0006/session for 30-min
+  meeting. HistoryCard preview + SessionDetail summary card deferred to
+  Sprint 3 (HistoryCard needs VecModel refactor). 14 new tests.
 
 ### Changed
 
@@ -69,6 +113,31 @@ for ~20-30 Vietnamese testers via unsigned MSI installer + landing page.
   install beyond `brew install cmake`. Windows/Linux unchanged: CPU by
   default, `--features vulkan` still opt-in. CoreML (Apple Neural Engine)
   deliberately deferred.
+- **`vong-audio`**: `VadConfig` now derives `Serialize` + `Deserialize`
+  (excluding `partial_emit_ms` which stays a protocol constant). New
+  `LiveVadConfig = Arc<Mutex<VadConfig>>` type alias + `run_vad_fsm_live()`
+  alongside the original. FSM snapshots from the handle at the top of each
+  process tick.
+- **`WhisperLocalProvider`**: `ctx` and `model_label` wrapped in
+  `Mutex<Arc<...>>` to support atomic `swap_context()` for live model
+  switching without restarting the streaming task.
+- **`vong-transcribe::traits::LiveSttConfig`**: 4 new fields wiring the
+  dictionary into per-utterance snapshot - `dictionary: Vec<DictEntry>`,
+  `dictionary_prompt: String` (Whisper cache), `dictionary_soniox_terms:
+  Vec<String>` (Soniox cache), `dictionary_openai_instructions: String`
+  (OpenAI cache). `rebuild_dictionary_caches()` regenerates the 3 caches
+  from the canonical `dictionary` field.
+- **`vong-storage`**: `NewSummary` + `Summary` structs + `insert_summary` /
+  `fetch_latest_summary` / `delete_summaries_for_session` repository helpers.
+  Schema from Phase 6 (`summaries` table) unchanged.
+- **Wizard schema**: still `v=2`, but step count grew from 7 to 8
+  (`CrashReport` inserted at index 6, `Done` shifted to 7). Sprint 1 alpha
+  users who already have `step.complete=...` in `onboarded.txt` are NOT
+  re-prompted (legacy completion is honored).
+- **`deny.toml`**: 4 RUSTSEC advisory ignores added for `rustls-webpki
+  0.102.8` CVEs (RUSTSEC-2026-0049/0098/0099/0104) - transitive via
+  `sentry 0.34 -> rustls 0.22.4`. Low risk: outbound Sentry transport only,
+  not user data path. Remove when `sentry-rust` bumps the rustls-webpki dep.
 
 ### Fixed
 

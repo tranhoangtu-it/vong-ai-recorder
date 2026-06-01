@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use vong_transcribe::ApiKey;
 
+use crate::sentry_init;
+
 // ── Schema version ────────────────────────────────────────────────────────────
 
 const SCHEMA_VERSION: &str = "v=2";
@@ -31,13 +33,14 @@ const SCHEMA_VERSION: &str = "v=2";
 /// Logical wizard steps in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
-    Welcome,  // 0
-    Audio,    // 1
-    Provider, // 2
-    ApiKey,   // 3 — conditional: shown only for Soniox / OpenAI
-    Model,    // 4 — conditional: shown only for LocalWhisper
-    Language, // 5
-    Done,     // 6
+    Welcome,     // 0
+    Audio,       // 1
+    Provider,    // 2
+    ApiKey,      // 3 — conditional: shown only for Soniox / OpenAI
+    Model,       // 4 — conditional: shown only for LocalWhisper
+    Language,    // 5
+    CrashReport, // 6 — Phase 9: opt-in crash reporting (Sentry)
+    Done,        // 7 (was 6 in schema v=2; Done shifted to 7 — legacy step.complete= still Complete)
 }
 
 impl WizardStep {
@@ -50,6 +53,7 @@ impl WizardStep {
             Self::ApiKey => "api_key",
             Self::Model => "model",
             Self::Language => "language",
+            Self::CrashReport => "crash_report",
             Self::Done => "done", // not directly persisted; step.complete= is written instead
         }
     }
@@ -65,7 +69,8 @@ impl WizardStep {
             Self::ApiKey => 3,
             Self::Model => 4,
             Self::Language => 5,
-            Self::Done => 6,
+            Self::CrashReport => 6,
+            Self::Done => 7, // was 6; shifted to 7 by insertion of CrashReport
         }
     }
 
@@ -78,7 +83,8 @@ impl WizardStep {
             3 => Some(Self::ApiKey),
             4 => Some(Self::Model),
             5 => Some(Self::Language),
-            6 => Some(Self::Done),
+            6 => Some(Self::CrashReport),
+            7 => Some(Self::Done),
             _ => None,
         }
     }
@@ -153,6 +159,11 @@ pub fn read_progress() -> WizardProgress {
     }
 
     // Walk step keys in order and find the last completed one.
+    // NOTE: step.crash_report.done= is included so resume logic works for
+    // new users who reach that step mid-wizard. Sprint 1 alpha users with
+    // step.complete= are already handled above (returns Complete before
+    // reaching this array). They get the Settings → System toggle as their
+    // only Sentry opt-in path — no re-onboarding triggered.
     let ordered_keys = [
         "step.welcome.done=",
         "step.audio.done=",
@@ -161,6 +172,7 @@ pub fn read_progress() -> WizardProgress {
         "step.api_key.",
         "step.model.done=",
         "step.language.done=",
+        "step.crash_report.done=", // Phase 9: index 6 in ordered_keys → WizardStep::CrashReport
     ];
 
     let mut last_completed: Option<usize> = None;
@@ -243,6 +255,25 @@ pub fn is_complete() -> bool {
     matches!(read_progress(), WizardProgress::Complete)
 }
 
+/// Persist the crash-report consent choice made at wizard step 6.
+///
+/// Writes both:
+/// - `sentry.txt` — the runtime gate read by `sentry_init::load_consent()`.
+/// - `onboarded.txt` line `step.crash_report.done=<timestamp>` — so that
+///   `read_progress()` can resume correctly if the wizard is interrupted
+///   after this step.
+///
+/// Caller is responsible for advancing the wizard to Done after this returns.
+pub fn mark_crash_report_consent(enabled: bool) -> io::Result<()> {
+    let state = if enabled {
+        sentry_init::ConsentState::Enabled
+    } else {
+        sentry_init::ConsentState::Disabled
+    };
+    sentry_init::save_consent(state)?;
+    mark_step_done(WizardStep::CrashReport)
+}
+
 // ── State machine: compute next step ─────────────────────────────────────────
 
 /// Compute which Slint step index to show after the user clicks Next on `current_step`.
@@ -262,8 +293,9 @@ pub fn compute_next_step_index(current_index: usize, provider: &str) -> usize {
         }
         3 => 5, // ApiKey → Language (skips Model for cloud providers)
         4 => 5, // Model → Language
-        5 => 6, // Language → Done
-        _ => 6, // Done stays at Done
+        5 => 6, // Language → CrashReport (Phase 9: was Language → Done)
+        6 => 7, // CrashReport → Done
+        _ => 7, // Done stays at Done
     }
 }
 
@@ -282,7 +314,8 @@ pub fn compute_prev_step_index(current_index: usize, provider: &str) -> usize {
                 _ => 4,
             }
         }
-        6 => 5, // Done → Language
+        6 => 5, // CrashReport → Language
+        7 => 6, // Done → CrashReport (was Done → Language at index 5→6)
         _ => 0,
     }
 }
@@ -604,10 +637,82 @@ mod tests {
 
     #[test]
     fn wizard_step_index_roundtrip() {
-        for i in 0..=6usize {
-            let step = WizardStep::from_index(i).expect("valid index");
+        // Updated for Phase 9: Done moved from index 6 → 7; CrashReport at 6.
+        for i in 0..=7usize {
+            let step = WizardStep::from_index(i).expect("valid index 0..=7");
             assert_eq!(step.index(), i);
         }
-        assert!(WizardStep::from_index(7).is_none());
+        assert!(WizardStep::from_index(8).is_none(), "index 8 must be out of range");
+    }
+
+    // ── Phase 9 wizard state-machine tests ──────────────────────────────────
+
+    #[test]
+    fn next_step_language_goes_to_crash_report() {
+        // Language (5) → CrashReport (6) — was Language → Done before Phase 9
+        assert_eq!(compute_next_step_index(5, "local-whisper"), 6);
+        assert_eq!(compute_next_step_index(5, "soniox"), 6);
+        assert_eq!(compute_next_step_index(5, "openai-realtime"), 6);
+    }
+
+    #[test]
+    fn next_step_crash_report_goes_to_done() {
+        // CrashReport (6) → Done (7)
+        assert_eq!(compute_next_step_index(6, "local-whisper"), 7);
+        assert_eq!(compute_next_step_index(6, "soniox"), 7);
+        assert_eq!(compute_next_step_index(6, "openai-realtime"), 7);
+    }
+
+    #[test]
+    fn prev_step_crash_report_goes_to_language() {
+        // CrashReport (6) Back → Language (5)
+        assert_eq!(compute_prev_step_index(6, "local-whisper"), 5);
+        assert_eq!(compute_prev_step_index(6, "soniox"), 5);
+    }
+
+    #[test]
+    fn prev_step_done_goes_to_crash_report() {
+        // Done (7) Back → CrashReport (6) — was Done → Language before Phase 9
+        assert_eq!(compute_prev_step_index(7, "local-whisper"), 6);
+        assert_eq!(compute_prev_step_index(7, "soniox"), 6);
+    }
+
+    #[test]
+    fn crash_report_step_key_and_index_consistent() {
+        let step = WizardStep::CrashReport;
+        assert_eq!(step.key(), "crash_report");
+        assert_eq!(step.index(), 6);
+        assert_eq!(WizardStep::from_index(6), Some(WizardStep::CrashReport));
+    }
+
+    #[test]
+    fn done_step_index_is_now_seven() {
+        // Verify Done shifted from 6 → 7.
+        assert_eq!(WizardStep::Done.index(), 7);
+        assert_eq!(WizardStep::from_index(7), Some(WizardStep::Done));
+    }
+
+    #[test]
+    fn parse_v2_with_crash_report_step_resumes_correctly() {
+        // A v=2 file where crash_report is the last completed step should
+        // resume at index 6 (the crash_report step's ordered_keys index).
+        let content = "v=2\nstep.welcome.done=1\nstep.audio.done=2\nstep.provider.done=3\nstep.model.done=4\nstep.language.done=5\nstep.crash_report.done=6\n";
+        let ordered_keys = [
+            "step.welcome.done=",
+            "step.audio.done=",
+            "step.provider.done=",
+            "step.api_key.",
+            "step.model.done=",
+            "step.language.done=",
+            "step.crash_report.done=",
+        ];
+        let mut last: Option<usize> = None;
+        for (idx, prefix) in ordered_keys.iter().enumerate() {
+            if content.lines().any(|l| l.trim().starts_with(prefix)) {
+                last = Some(idx);
+            }
+        }
+        // crash_report.done= is at ordered_keys index 6
+        assert_eq!(last, Some(6), "crash_report step should map to ordered_keys index 6");
     }
 }

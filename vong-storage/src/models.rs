@@ -100,6 +100,40 @@ pub struct Segment {
     pub is_final: bool,
 }
 
+/// New summary insert payload.
+#[derive(Debug, Clone)]
+pub struct NewSummary {
+    /// Foreign key to sessions.id.
+    pub session_id: i64,
+    /// Summary kind. Use `"session"` for end-of-session LLM summaries.
+    pub kind: String,
+    /// LLM provider identifier e.g. `"openai"`.
+    pub llm_provider: Option<String>,
+    /// LLM model tag e.g. `"gpt-4o-mini-2024-07-18"`.
+    pub llm_model: Option<String>,
+    /// Summary text content (Vietnamese prose, 3-5 sentences).
+    pub content: String,
+}
+
+/// Existing summary row (post-insert/select).
+#[derive(Debug, Clone)]
+pub struct Summary {
+    /// Primary key.
+    pub id: i64,
+    /// Foreign key to sessions.id.
+    pub session_id: i64,
+    /// Summary kind.
+    pub kind: String,
+    /// LLM provider.
+    pub llm_provider: Option<String>,
+    /// LLM model.
+    pub llm_model: Option<String>,
+    /// Summary text.
+    pub content: String,
+    /// Creation time in epoch milliseconds (UTC).
+    pub created_at_ms: i64,
+}
+
 /// FTS search hit — includes snippet for UI highlight.
 #[derive(Debug, Clone)]
 pub struct SearchHit {

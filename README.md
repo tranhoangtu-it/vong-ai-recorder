@@ -18,7 +18,11 @@ Desktop transcription app cho Windows 10/11 với real-time Vietnamese-first tra
 - 🪟 **System tray + global hotkey** — Ctrl+Shift+R toggle window visibility
 - 💊 **Floating Pill** — borderless overlay 360×140 always-on-top, live transcript + peak meter
 - 📥 **Export Markdown** — xuất phiên ghi ra `~/Documents/Vong/session-N.md`
-- 👋 **First-launch onboarding** — banner welcome dismissible, marker file persist
+- 👋 **First-launch wizard** — 8-step flow (Welcome -> AudioSource -> Provider -> ApiKey -> Model -> Language -> CrashReport -> Done), crash-resume, live API-key test
+- 🎛 **Recording settings sliders** — VAD threshold / hangover / max-duration tune live (no restart) + Whisper model picker switches `ggml-{tiny,base,small,medium}.bin` atomically
+- 📚 **Dictionary** — tới 100 từ vựng riêng (tên người, thuật ngữ chuyên ngành) inject vào Whisper `initial_prompt` / Soniox `context` / OpenAI Realtime `instructions`
+- 🛡 **Crash reporting opt-in (Sentry)** — gửi crash report ẩn danh, mặc định TẮT, scrubber bóc transcript/audio/API key/file path khỏi events
+- ✨ **AI session summaries** — sau khi dừng ghi, OpenAI `gpt-4o-mini` tóm tắt tiếng Việt 3-5 câu (~$0.0006/phiên 30 phút)
 - 📜 **Log rotation** — daily rolling file ở `%APPDATA%\Vong\Vong AI Recorder\data\logs\`
 
 ## Quick Start (Dev)
@@ -147,7 +151,13 @@ vong-ui/       Reusable Slint components (Phase 5-future — currently inlined i
 | 5 | ✅ Wired | Tray + global hotkey + Floating Pill |
 | 6 | ✅ Wired | SQLite FTS5 + History UI + Search UI + Markdown export |
 | 7 | ✅ Minimal | First-launch onboarding banner + dismiss persist |
-| 8 | ⏳ Pending | MSI/MSIX installer + Authenticode signing + auto-update |
+| 7 | ✅ Wired | First-run wizard (8 steps) + onboarding state machine |
+| 8 | ✅ Wired | MSI installer (per-user, unsigned) - needs WiX Toolset v3.14.1 to build locally |
+| 9 | ✅ Wired | R2 release pipeline (CI tag-trigger -> MSI build -> upload -> draft GH Release) |
+| 10 | ✅ Wired | Recording settings sliders + Whisper model picker (live-apply) |
+| 11 | ✅ Wired | Dictionary (custom vocabulary, <=100 entries, 3-provider injection) |
+| 12 | ✅ Wired | Crash reporting opt-in (Sentry, default OFF, scrubbed) |
+| 13 | ✅ Wired | AI session summaries (OpenAI gpt-4o-mini, end-of-session) |
 | 2-macOS | ⏸ Paused | screencapturekit + clock drift — deferred until Windows ships |
 
 **Wiring status**: All 7 wired phases functional via `vong-app/src/main.rs` pipeline.

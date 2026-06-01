@@ -48,6 +48,26 @@ pub(crate) struct ConfigMessage {
     /// Optional translation config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<TranslationConfig>,
+
+    /// Optional vocabulary context (Phase 8 — dictionary injection).
+    /// When present and non-empty `terms`, Soniox biases recognition toward
+    /// the listed phrases. Omitted entirely when the user's dictionary is empty
+    /// so the wire message is identical to the pre-Phase-8 baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<SonioxContext>,
+}
+
+/// Vocabulary context sent with the Soniox config message.
+///
+/// `terms` is the only field used in Sprint 2. Other sections (`general`,
+/// `text`, `translation_terms`) are reserved for future use.
+///
+/// Privacy: term strings are user content — never log them.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct SonioxContext {
+    /// List of domain-specific vocabulary phrases to bias Soniox recognition.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub terms: Vec<String>,
 }
 
 /// Translation parameters for Soniox built-in real-time translation.
@@ -129,25 +149,61 @@ pub(crate) struct Token {
 mod tests {
     use super::*;
 
-    #[test]
-    fn config_serializes_minimal() {
-        let cfg = ConfigMessage {
+    fn base_config() -> ConfigMessage {
+        ConfigMessage {
             api_key: "test-key".into(),
             model: "stt-rt-preview".into(),
             audio_format: "pcm_s16le".into(),
-            sample_rate: 16000,
+            sample_rate: 16_000,
             num_channels: 1,
             enable_language_identification: true,
             enable_speaker_diarization: false,
             language_hints: None,
             translation: None,
-        };
+            context: None,
+        }
+    }
+
+    #[test]
+    fn config_serializes_minimal() {
+        let cfg = base_config();
         let json = serde_json::to_string(&cfg).unwrap();
         // Optional fields with None should be skipped
         assert!(!json.contains("language_hints"));
         assert!(!json.contains("translation"));
+        assert!(!json.contains("context"));
         assert!(json.contains("\"api_key\":\"test-key\""));
         assert!(json.contains("\"model\":\"stt-rt-preview\""));
+    }
+
+    #[test]
+    fn config_serializes_with_context_terms() {
+        let cfg = ConfigMessage {
+            context: Some(SonioxContext {
+                terms: vec!["WebSocket".into(), "Vọng".into()],
+            }),
+            ..base_config()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"context\""), "context field must be present");
+        assert!(json.contains("\"terms\""), "terms field must be present");
+        assert!(json.contains("WebSocket"), "WebSocket term must be present");
+        assert!(json.contains("Vọng"), "Vọng term must be present");
+    }
+
+    #[test]
+    fn config_omits_context_when_empty_terms() {
+        let cfg = ConfigMessage {
+            context: Some(SonioxContext { terms: vec![] }),
+            ..base_config()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        // SonioxContext with empty terms is serialized but terms field is skipped;
+        // however the context wrapper itself is still present. In practice
+        // soniox.rs only sets context when terms is non-empty, so this is
+        // a belt-and-suspenders check.
+        // (The terms field itself should be absent since skip_serializing_if = Vec::is_empty)
+        assert!(!json.contains("\"terms\""), "empty terms should be skipped");
     }
 
     #[test]

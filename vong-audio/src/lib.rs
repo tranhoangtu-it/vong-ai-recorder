@@ -63,7 +63,7 @@ pub use types::{
     TARGET_SAMPLE_RATE_HZ,
 };
 pub use utterance::{PreRollBuffer, Utterance, UtteranceBuilder};
-pub use vad::{run_vad_fsm, VadConfig, VadFsm, VAD_FRAME_MS, VAD_FRAME_SAMPLES};
+pub use vad::{run_vad_fsm, run_vad_fsm_live, LiveVadConfig, VadConfig, VadFsm, VAD_FRAME_MS, VAD_FRAME_SAMPLES};
 
 /// Vọng audio subsystem version.
 pub fn version() -> &'static str {

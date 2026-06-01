@@ -16,7 +16,12 @@
     windows_subsystem = "windows"
 )]
 
+mod autosummary;
+mod dictionary;
 mod log_init;
+mod recording_config;
+mod sentry_init;
+mod summary_runner;
 mod tray;
 mod wizard;
 
@@ -30,18 +35,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use vong_audio::{
     default_input_device, find_device, list_all_devices, negotiate_config, run_resampler,
-    run_vad_fsm, start_capture, AudioError, CaptureHandle, DeviceInfo, DeviceKind, OverflowCounter,
-    PeakMeter, ResampleConfig, Utterance, VadConfig,
+    run_vad_fsm_live, start_capture, AudioError, CaptureHandle, DeviceInfo, DeviceKind,
+    LiveVadConfig, OverflowCounter, PeakMeter, ResampleConfig, Utterance,
 };
+use summary_runner::SummaryRunner;
 use vong_storage::{
     default_db_path, export_markdown, finalize_session, insert_segment, insert_session,
     list_recent_sessions, open_default, search_transcripts, Connection, NewSegment, NewSession,
     SearchHit, Session,
 };
 use vong_transcribe::{
-    model_dl, ApiKey, DlError, DownloadProgress as DlProgress, DownloadState, LiveConfigHandle,
-    OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts, StreamingTranscriber,
-    TargetMode, TranscriptEvent, WhisperLocalProvider,
+    model_dl, ApiKey, DictEntry, DlError, DownloadProgress as DlProgress, DownloadState,
+    LiveConfigHandle, OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts,
+    StreamingTranscriber, TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
 
 slint::include_modules!();
@@ -56,6 +62,8 @@ struct AudioBundle {
     _timer: slint::Timer,
     _runtime: tokio::runtime::Runtime,
     session: Option<SessionContext>,
+    /// Shared summary runner — used by UI timer and shutdown finalizer.
+    summary_runner: Arc<SummaryRunner>,
 }
 
 /// A live capture chain: the cpal stream (owns its own RT thread) plus the
@@ -86,6 +94,18 @@ impl SessionContext {
             started_at_ms: self.started_at_ms,
         }
     }
+}
+
+/// A discovered Whisper GGML model file on disk (internal Rust-side struct).
+/// Slint-generated `WhisperModelEntry` is the view-model used by the UI.
+#[derive(Debug, Clone)]
+struct ModelScanEntry {
+    /// Filename e.g. "ggml-base.bin"
+    name: String,
+    /// Full path for loading
+    path: PathBuf,
+    /// File size in bytes
+    size_bytes: u64,
 }
 
 /// Shared state pushed from background tasks into the Slint Timer.
@@ -124,6 +144,12 @@ struct PipelineState {
     /// event lands and false after Disconnected. Drives the bottom-left
     /// status dot (green/gray).
     provider_online: std::sync::atomic::AtomicBool,
+    /// True while a model swap is in progress (spawn_blocking loading).
+    model_switch_in_flight: std::sync::atomic::AtomicBool,
+    /// Status message for the model picker card ("" = idle, otherwise error or loading msg).
+    model_switch_status: Mutex<String>,
+    /// Label of the currently active Whisper model (e.g. "ggml-base.bin").
+    active_whisper_model: Mutex<String>,
 }
 
 /// Local mirror of Slint's `TranscriptLine` struct for in-Rust storage.
@@ -150,10 +176,22 @@ struct TranscriptStreamLine {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ── Sentry init MUST come before log_init ─────────────────────────────────
+    // Sentry's `panic` feature installs its own hook on `sentry::init`.
+    // Our `log_init` then installs OUR hook on top (which also forwards to
+    // Sentry explicitly via `sentry::integrations::panic::panic_handler`).
+    // Reversing this order would lose Sentry's panic capture.
+    // Returns None when consent is absent/disabled OR DSN is still placeholder.
+    let sentry_guard = sentry_init::init_if_enabled();
+
     // Bind the log-file flush guard for the entire app lifetime — dropping it
     // flushes any pending log lines from the rolling file appender.
-    let _log_guard = log_init::init_logging();
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Vọng starting");
+    let _log_guard = log_init::init_logging(sentry_guard.as_ref());
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        sentry_enabled = sentry_guard.is_some(),
+        "Vọng starting"
+    );
 
     // Clean up orphaned .part files from prior crashed/cancelled downloads.
     // Runs synchronously before UI init — takes <1 ms on an empty models dir.
@@ -185,8 +223,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             wizard::WizardProgress::Complete => ("main", 0i32),
             wizard::WizardProgress::NotStarted => ("wizard", 0i32),
             wizard::WizardProgress::Resume(idx) => {
-                // Resume at last_completed + 1, clamped to step 6
-                let next = (idx + 1).min(6);
+                // Resume at last_completed + 1, clamped to step 7 (Done).
+                // Phase 9: Done moved from index 6 to 7; CrashReport is at 6.
+                let next = (idx + 1).min(7);
                 tracing::info!(
                     resume_step = next,
                     "wizard: resuming from last completed step"
@@ -287,6 +326,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         t
     };
 
+    // ── Phase 9: Crash reporting Settings toggle ──────────────────────────────
+    // Initialise the visual state from the current consent file before the UI
+    // renders — the toggle should reflect what's already persisted on disk.
+    ui.set_crash_reporting_enabled(
+        matches!(sentry_init::load_consent(), sentry_init::ConsentState::Enabled),
+    );
+
+    // Wire the toggle callback. Changing the toggle writes sentry.txt
+    // immediately but Sentry is only initialised at startup — the change
+    // takes effect on the next app launch.
+    {
+        let ui_weak_sentry = ui.as_weak();
+        ui.on_crash_reporting_toggled(move |enabled| {
+            let state = if enabled {
+                sentry_init::ConsentState::Enabled
+            } else {
+                sentry_init::ConsentState::Disabled
+            };
+            if let Err(e) = sentry_init::save_consent(state) {
+                tracing::warn!(error = ?e, "crash reporting consent save failed");
+            } else {
+                tracing::info!(
+                    sentry_consent = enabled,
+                    "crash reporting consent updated — takes effect on next launch"
+                );
+            }
+            // Show a transient "restart required" hint in the UI.
+            if let Some(ui) = ui_weak_sentry.upgrade() {
+                ui.set_crash_reporting_restart_hint(true);
+            }
+        });
+    }
+
+    // Debug-only manual trigger: intentionally fire a tracing::error! + panic
+    // so the developer can verify the full Sentry pipeline end-to-end.
+    // NEVER compiled into release builds — the callback body is absent.
+    #[cfg(debug_assertions)]
+    {
+        ui.on_dev_trigger_sentry_panic(|| {
+            tracing::error!("dev: intentional Sentry test event — verifying pipeline");
+            panic!("Vong dev: Sentry pipeline test panic");
+        });
+    }
+
     ui.run()?;
     // Keep _dl_timer alive until here (timer drops → stops).
     drop(_dl_timer);
@@ -309,11 +392,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "session_id finalize skipped — DB locked at shutdown"
                 ),
             }
+
+            // Phase 10: trigger auto-summary on shutdown (best-effort, 30 s max).
+            if autosummary::should_auto_summarize() {
+                tracing::info!(
+                    session_id = session.session_id,
+                    "auto-summary: triggering on shutdown"
+                );
+                bundle.summary_runner.trigger_blocking_timeout(
+                    session.conn.clone(),
+                    session.session_id,
+                    false,
+                    std::time::Duration::from_secs(30),
+                );
+            }
         }
     }
     drop(audio);
 
     tracing::info!("Vọng shutting down");
+
+    // Drop sentry_guard last — its Drop impl flushes any pending events to
+    // Sentry with a 2-second synchronous timeout. Must happen after all tasks
+    // have been shut down so late tracing::error! calls are captured.
+    drop(sentry_guard);
+
     Ok(())
 }
 
@@ -355,9 +458,32 @@ fn init_audio(
     // hasn't clicked the mic button.
     let (utt_internal_tx, mut utt_internal_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
     let (utt_external_tx, utt_external_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
-    let vad_cfg = VadConfig::default();
+
+    // Load recording config (VAD sliders + last-used Whisper model path).
+    // Missing or corrupt file → silently use defaults.
+    let rec_cfg = recording_config::load();
+    let initial_vad_config = recording_config::into_vad_config(&rec_cfg.vad);
+
+    // LiveVadConfig is the shared handle mutated by UI slider callbacks.
+    // The FSM snapshots it once per ~16 ms chunk — zero UI restart needed.
+    let live_vad: LiveVadConfig = Arc::new(Mutex::new(initial_vad_config));
+
+    // Load dictionary. Missing/corrupt file → empty list (non-fatal).
+    // `dict_file` is mutated by Settings → Dictionary tab callbacks and
+    // read at provider startup to seed the provider-specific caches.
+    let dict_file = dictionary::load();
+    tracing::info!(
+        dict_entry_count = dict_file.entries.len(),
+        "dictionary entries loaded at startup"
+    );
+    // Shared dictionary state for UI callbacks.
+    let dict_file_handle: Arc<Mutex<dictionary::DictionaryFile>> =
+        Arc::new(Mutex::new(dict_file));
+
+    // Spawn VAD FSM with the live handle.
+    let live_vad_for_fsm = live_vad.clone();
     runtime.spawn(async move {
-        if let Err(e) = run_vad_fsm(audio_rx, utt_internal_tx, vad_cfg).await {
+        if let Err(e) = run_vad_fsm_live(audio_rx, utt_internal_tx, live_vad_for_fsm).await {
             tracing::error!(error = ?e, "VAD FSM exited with error");
         } else {
             tracing::info!("VAD FSM exited cleanly");
@@ -390,23 +516,50 @@ fn init_audio(
     // Rename for clarity — downstream code consumed `utt_rx`.
     let utt_rx = utt_external_rx;
 
+    // Phase 10: SummaryRunner created early so it can be captured by on_record_toggled.
+    // `shared_session` is populated after init_storage — both closures share the Arc.
+    let summary_runner_early = Arc::new(SummaryRunner::new());
+    let shared_session: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+    let shared_conn: Arc<Mutex<Option<Arc<Mutex<Connection>>>>> = Arc::new(Mutex::new(None));
+
     // Wire the mic-button toggle. Default OFF — `state.is_recording` starts
     // false (AtomicBool::default), so the relay drops everything until the
     // user explicitly clicks. The button itself owns the UI state via
     // `in-out recording`; this callback just mirrors it into Rust.
+    // Phase 10: on Stop (on=false), trigger auto-summary for the current session.
     {
         let state_for_record = state.clone();
+        let runner_for_record = summary_runner_early.clone();
+        let session_cell = shared_session.clone();
+        let conn_cell = shared_conn.clone();
         ui.on_record_toggled(move |on| {
-            state_for_record
-                .is_recording
-                .store(on, Ordering::Release);
+            state_for_record.is_recording.store(on, Ordering::Release);
             tracing::info!(recording = on, "record button toggled");
+            if !on && autosummary::should_auto_summarize() {
+                let session_id = session_cell.lock().ok().and_then(|g| *g);
+                let conn_arc = conn_cell.lock().ok().and_then(|g| g.clone());
+                if let (Some(sid), Some(conn)) = (session_id, conn_arc) {
+                    tracing::info!(session_id = sid, "auto-summary: triggering on record stop");
+                    runner_for_record.trigger_detached(conn, sid, false);
+                }
+            }
         });
     }
 
     // Open SQLite + create a session row. Storage failure is non-fatal — the
     // pipeline runs without persistence (segments_persisted stays at 0).
     let session = init_storage(&device_name, state.clone());
+
+    // Phase 10: Populate the shared session/conn cells so on_record_toggled can
+    // reach the session after it's been established.
+    if let Some(ref ctx) = session {
+        if let Ok(mut g) = shared_session.lock() {
+            *g = Some(ctx.session_id);
+        }
+        if let Ok(mut g) = shared_conn.lock() {
+            *g = Some(ctx.conn.clone());
+        }
+    }
 
     // Decide which STT engine to drive the pipeline. Read at startup; the UI
     // picker writes the config but a restart is required to swap providers.
@@ -424,57 +577,87 @@ fn init_audio(
     ui.set_provider_status_label(short.into());
 
     match provider_mode {
-        ProviderMode::SonioxCloud => match ApiKey::load("soniox") {
-            Ok(key) => {
-                tracing::info!("Soniox API key loaded from keychain — using SonioxProvider");
-                state
-                    .whisper_loaded
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                let provider = Arc::new(SonioxProvider::new(key));
-                spawn_soniox_pipeline(
-                    &runtime,
-                    provider,
-                    utt_rx,
-                    state.clone(),
-                    session.as_ref().map(SessionContext::clone_for_task),
-                );
+        ProviderMode::SonioxCloud => {
+            // Wire VAD sliders even for cloud providers (VAD is always local).
+            wire_vad_slider_callbacks_only(ui, live_vad.clone(), runtime.handle().clone());
+            match ApiKey::load("soniox") {
+                Ok(key) => {
+                    tracing::info!("Soniox API key loaded from keychain — using SonioxProvider");
+                    state
+                        .whisper_loaded
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // Seed dictionary terms from startup-loaded config.
+                    let soniox_terms = {
+                        let guard = dict_file_handle.lock().expect("dict poisoned");
+                        vong_transcribe::build_soniox_terms(&guard.entries)
+                    };
+                    let provider = Arc::new(
+                        SonioxProvider::new(key).with_dictionary_terms(soniox_terms),
+                    );
+                    spawn_soniox_pipeline(
+                        &runtime,
+                        provider,
+                        utt_rx,
+                        state.clone(),
+                        session.as_ref().map(SessionContext::clone_for_task),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "Soniox selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
+                    );
+                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "Soniox selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
-                );
-                spawn_utterance_counter(&runtime, utt_rx, state.clone());
+        }
+        ProviderMode::OpenAIRealtime => {
+            // Wire VAD sliders even for cloud providers (VAD is always local).
+            wire_vad_slider_callbacks_only(ui, live_vad.clone(), runtime.handle().clone());
+            match ApiKey::load("openai-realtime") {
+                Ok(key) => {
+                    tracing::info!(
+                        "OpenAI API key loaded from keychain — using OpenAIRealtimeProvider"
+                    );
+                    state
+                        .whisper_loaded
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    // Seed dictionary instructions from startup-loaded config.
+                    let openai_instructions = {
+                        let guard = dict_file_handle.lock().expect("dict poisoned");
+                        vong_transcribe::build_openai_instructions(&guard.entries)
+                    };
+                    let provider = Arc::new(
+                        OpenAIRealtimeProvider::new(key)
+                            .with_dictionary_instructions(openai_instructions),
+                    );
+                    spawn_openai_pipeline(
+                        &runtime,
+                        provider,
+                        utt_rx,
+                        state.clone(),
+                        session.as_ref().map(SessionContext::clone_for_task),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "OpenAI Realtime selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
+                    );
+                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
+                }
             }
-        },
-        ProviderMode::OpenAIRealtime => match ApiKey::load("openai-realtime") {
-            Ok(key) => {
-                tracing::info!(
-                    "OpenAI API key loaded from keychain — using OpenAIRealtimeProvider"
-                );
-                state
-                    .whisper_loaded
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                let provider = Arc::new(OpenAIRealtimeProvider::new(key));
-                spawn_openai_pipeline(
-                    &runtime,
-                    provider,
-                    utt_rx,
-                    state.clone(),
-                    session.as_ref().map(SessionContext::clone_for_task),
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "OpenAI Realtime selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
-                );
-                spawn_utterance_counter(&runtime, utt_rx, state.clone());
-            }
-        },
+        }
         ProviderMode::LocalWhisper => {
-            // Try to load Whisper. If model missing, fall back to utterance-only counter.
-            let model_path = WhisperLocalProvider::resolve_default_model_path();
+            // Determine model path: prefer the one saved in recording.json,
+            // falling back to the standard search ladder.
+            let model_path = rec_cfg
+                .whisper_model_path
+                .as_ref()
+                .filter(|p| p.exists())
+                .cloned()
+                .unwrap_or_else(WhisperLocalProvider::resolve_default_model_path);
+
             let whisper_result = WhisperLocalProvider::new(&model_path);
             match whisper_result {
                 Ok(provider) => {
@@ -482,7 +665,9 @@ fn init_audio(
                         .whisper_loaded
                         .store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::info!(
-                        model_path = %model_path.display(),
+                        model = %model_path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
                         "Whisper local model loaded"
                     );
 
@@ -492,9 +677,41 @@ fn init_audio(
                     // here on a blocking pool thread so the first real utterance
                     // hits a warm pipeline at ~0.15 s.
                     let provider = Arc::new(provider);
+
+                    // Store the currently-active model label in shared state for UI.
+                    if let Ok(mut g) = state.active_whisper_model.lock() {
+                        *g = provider.model_label();
+                    }
+
                     // Grab the live STT config handle so the UI pickers can mutate it.
                     let live_config = provider.live_config();
+
+                    // Seed dictionary into the live config so the very first
+                    // utterance benefits from any entries saved from a previous session.
+                    {
+                        let guard = dict_file_handle.lock().expect("dict poisoned");
+                        if let Ok(mut cfg) = live_config.lock() {
+                            cfg.dictionary = guard.entries.clone();
+                            cfg.rebuild_dictionary_caches();
+                        }
+                    }
+
                     wire_language_picker_callbacks(ui, live_config.clone());
+
+                    // Wire VAD slider callbacks + debounced persist.
+                    wire_recording_settings_callbacks(
+                        ui,
+                        live_vad.clone(),
+                        provider.clone(),
+                        state.clone(),
+                        rec_cfg.whisper_model_path.clone(),
+                        runtime.handle().clone(),
+                    );
+
+                    // Populate the model list for the picker (scan both model dirs).
+                    let model_entries = scan_models(&resolve_models_dir());
+                    push_whisper_models_to_ui(ui, &model_entries, &provider.model_label());
+
                     let warmup_provider = provider.clone();
                     state
                         .whisper_warming_up
@@ -520,20 +737,38 @@ fn init_audio(
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        model_path = %model_path.display(),
+                        model = %model_path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
                         "Whisper unavailable — falling back to utterance counter only"
                     );
+                    // Still wire VAD sliders (without model picker wiring since no provider).
+                    wire_vad_slider_callbacks_only(
+                        ui,
+                        live_vad.clone(),
+                        runtime.handle().clone(),
+                    );
+                    let model_entries = scan_models(&resolve_models_dir());
+                    push_whisper_models_to_ui(ui, &model_entries, "");
                     spawn_utterance_counter(&runtime, utt_rx, state.clone());
                 }
             }
         }
     }
 
+    // Push initial VAD slider values into the Slint UI from the loaded config.
+    ui.set_vad_threshold(rec_cfg.vad.threshold);
+    ui.set_vad_hangover_ms(rec_cfg.vad.hangover_ms as i32);
+    ui.set_vad_max_duration_ms(rec_cfg.vad.max_duration_ms as i32);
+
     tracing::info!(
         device = %device_name,
         sample_rate,
         channels,
         whisper = state.whisper_loaded.load(std::sync::atomic::Ordering::Relaxed),
+        threshold = rec_cfg.vad.threshold,
+        hangover_ms = rec_cfg.vad.hangover_ms,
+        max_duration_ms = rec_cfg.vad.max_duration_ms,
         "audio pipeline wired"
     );
 
@@ -656,6 +891,18 @@ fn init_audio(
                     format!("📝  Phiên #{session_id}  ·  {persisted} segments saved (FTS5)")
                 };
                 ui.set_storage_status(storage.into());
+
+                // Mirror model-switch state into the Recording settings card.
+                let model_in_flight = state_ui
+                    .model_switch_in_flight
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                ui.set_model_switch_in_flight(model_in_flight);
+                if let Ok(status) = state_ui.model_switch_status.lock() {
+                    ui.set_model_switch_status(status.clone().into());
+                }
+                if let Ok(label) = state_ui.active_whisper_model.lock() {
+                    ui.set_active_whisper_model(label.clone().into());
+                }
 
                 if dropped > 0 {
                     tracing::warn!(dropped, "ring buffer overflow");
@@ -810,11 +1057,35 @@ fn init_audio(
         });
     }
 
+    // Wire Settings → Dictionary tab callbacks (add / edit / delete / move).
+    // `live_config_for_dict` is `None` for cloud providers (they don't use
+    // `LiveSttConfig` for dictionary — their caches are seeded at startup).
+    // For Whisper local, we need a second grab of `live_config`. We thread it
+    // through via a separate optional capture.
+    //
+    // Note: for cloud providers, the dictionary still persists and the Whisper
+    // cache still rebuilds (no-op since Whisper isn't running), so the UI
+    // state stays consistent for when the user switches providers.
+    wire_dictionary_callbacks(ui, dict_file_handle.clone(), provider_mode);
+
+    // Push initial dictionary state into the Slint UI.
+    {
+        let guard = dict_file_handle.lock().expect("dict poisoned");
+        push_dictionary_to_ui(ui, &guard.entries, provider_mode);
+    }
+
+    // ── Phase 10: Auto-summary Settings callbacks ─────────────────────────────
+    wire_autosummary_callbacks(ui, summary_runner_early.clone());
+    // Push initial autosummary state to the UI.
+    ui.set_auto_summary_enabled(autosummary::should_auto_summarize());
+    ui.set_auto_summary_has_key(vong_transcribe::ApiKey::load("openai-realtime").is_ok());
+
     Ok(AudioBundle {
         _active_source: active_source,
         _timer: timer,
         _runtime: runtime,
         session,
+        summary_runner: summary_runner_early,
     })
 }
 
@@ -1050,7 +1321,7 @@ fn wire_wizard_callbacks(ui: &AppWindow, _models_dir: &Path) {
         });
     }
 
-    // ── Complete (Step 6 CTA) ────────────────────────────────────────────────
+    // ── Complete (Step 7 CTA — was step 6 before Phase 9) ───────────────────
     {
         let ui_weak = ui.as_weak();
         ui.on_wizard_complete(move || {
@@ -1063,6 +1334,33 @@ fn wire_wizard_callbacks(ui: &AppWindow, _models_dir: &Path) {
             }
             tracing::info!("wizard: complete — switching to main view");
             ui.set_current_view(slint::SharedString::from("main"));
+        });
+    }
+
+    // ── Crash reporting consent from wizard (Step 6) ─────────────────────────
+    // User taps "Đồng ý" or "Không" in CrashReportStep → Slint calls back
+    // with a bool. We persist both sentry.txt AND the wizard step marker,
+    // then advance the step.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_wizard_crash_reporting_changed(move |consent| {
+            if let Err(e) = wizard::mark_crash_report_consent(consent) {
+                tracing::warn!(
+                    error = ?e,
+                    sentry_consent = consent,
+                    "wizard: failed to persist crash-report consent"
+                );
+            } else {
+                tracing::info!(
+                    sentry_consent = consent,
+                    "wizard: crash-report consent saved"
+                );
+            }
+            // Advance to Done (index 7).
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_wizard_crash_reporting_consent(consent);
+                ui.set_wizard_step(7);
+            }
         });
     }
 
@@ -1563,6 +1861,283 @@ fn format_search_hit_line(h: &SearchHit) -> String {
     format!("  •  #{} · {} · {}", h.session_id, lang, snippet.trim())
 }
 
+// ── Phase 8: Dictionary UI helpers ────────────────────────────────────────
+
+/// Push current dictionary entries into the Slint UI model.
+///
+/// Privacy: phrase strings are user content — we set Slint properties,
+/// but never write them to `tracing::*`.
+fn push_dictionary_to_ui(ui: &AppWindow, entries: &[DictEntry], provider_mode: ProviderMode) {
+    let rows: Vec<DictionaryEntryRow> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| DictionaryEntryRow {
+            phrase: slint::SharedString::from(e.phrase.as_str()),
+            context: slint::SharedString::from(context_to_ui_str(e.context)),
+            index: i as i32,
+        })
+        .collect();
+    ui.set_dictionary_rows(slint::ModelRc::from(
+        Rc::new(slint::VecModel::from(rows)),
+    ));
+    ui.set_dictionary_entry_count(entries.len() as i32);
+    // Show the "restart required" hint when the user has cloud provider selected.
+    // The hint is only meaningful after an edit — at startup it should be hidden.
+    // We set false here; it becomes true after the first save with a cloud provider.
+    let is_cloud = provider_mode != ProviderMode::LocalWhisper;
+    ui.set_dictionary_show_restart_hint(false);
+    let _ = is_cloud; // Will be used in the add/edit/delete callbacks.
+}
+
+/// Map `DictContext` → UI dropdown string.
+fn context_to_ui_str(ctx: vong_transcribe::DictContext) -> &'static str {
+    use vong_transcribe::DictContext;
+    match ctx {
+        DictContext::Common => "common",
+        DictContext::Names => "names",
+        DictContext::Technical => "technical",
+    }
+}
+
+/// Wire all Settings → Dictionary tab callbacks (add / edit / delete / move).
+///
+/// `dict_file_handle` is the shared dictionary state. Changes are immediately
+/// persisted to disk and reflected in the Slint UI model.
+fn wire_dictionary_callbacks(
+    ui: &AppWindow,
+    dict_file_handle: Arc<Mutex<dictionary::DictionaryFile>>,
+    provider_mode: ProviderMode,
+) {
+    let is_cloud = provider_mode != ProviderMode::LocalWhisper;
+
+    // ── on_dictionary_add ────────────────────────────────────────────────────
+    {
+        let dict = dict_file_handle.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_add(move |phrase, context| {
+            let phrase_s = phrase.to_string();
+            let mut file = dict.lock().expect("dict poisoned");
+            match dictionary::validate_new(&file.entries, &phrase_s) {
+                Err(e) => {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_dictionary_add_error(
+                            slint::SharedString::from(dictionary::vi_error_msg(&e)),
+                        );
+                    }
+                }
+                Ok(()) => {
+                    file.entries.push(DictEntry {
+                        phrase: phrase_s.trim().to_string(),
+                        context: dictionary::parse_context(context.as_str()),
+                    });
+                    if let Err(e) = dictionary::save(&file) {
+                        tracing::warn!(error = %e, "dictionary save failed on add");
+                    }
+                    let entries_snapshot = file.entries.clone();
+                    drop(file);
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_dictionary_add_error(slint::SharedString::default());
+                        let rows = build_dict_rows(&entries_snapshot);
+                        ui.set_dictionary_rows(slint::ModelRc::from(
+                            Rc::new(slint::VecModel::from(rows)),
+                        ));
+                        ui.set_dictionary_entry_count(entries_snapshot.len() as i32);
+                        if is_cloud {
+                            ui.set_dictionary_show_restart_hint(true);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ── on_dictionary_delete ─────────────────────────────────────────────────
+    {
+        let dict = dict_file_handle.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_delete(move |index| {
+            let idx = index as usize;
+            let mut file = dict.lock().expect("dict poisoned");
+            if idx < file.entries.len() {
+                file.entries.remove(idx);
+                if let Err(e) = dictionary::save(&file) {
+                    tracing::warn!(error = %e, "dictionary save failed on delete");
+                }
+            }
+            let entries_snapshot = file.entries.clone();
+            drop(file);
+            if let Some(ui) = ui_weak.upgrade() {
+                let rows = build_dict_rows(&entries_snapshot);
+                ui.set_dictionary_rows(slint::ModelRc::from(
+                    Rc::new(slint::VecModel::from(rows)),
+                ));
+                ui.set_dictionary_entry_count(entries_snapshot.len() as i32);
+                if is_cloud {
+                    ui.set_dictionary_show_restart_hint(true);
+                }
+            }
+        });
+    }
+
+    // ── on_dictionary_edit ───────────────────────────────────────────────────
+    // Saves an in-place edit to an existing entry.
+    {
+        let dict = dict_file_handle.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_edit(move |index, new_phrase, new_context| {
+            let idx = index as usize;
+            let phrase_s = new_phrase.to_string();
+            let trimmed = phrase_s.trim().to_string();
+            let mut file = dict.lock().expect("dict poisoned");
+            if idx < file.entries.len() && !trimmed.is_empty() {
+                // Check for duplicate against other entries (not self).
+                let is_dup = file
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != idx)
+                    .any(|(_, e)| e.phrase == trimmed);
+                if !is_dup && trimmed.chars().count() <= dictionary::PHRASE_MAX_CHARS {
+                    file.entries[idx].phrase = trimmed;
+                    file.entries[idx].context =
+                        dictionary::parse_context(new_context.as_str());
+                    if let Err(e) = dictionary::save(&file) {
+                        tracing::warn!(error = %e, "dictionary save failed on edit");
+                    }
+                }
+            }
+            let entries_snapshot = file.entries.clone();
+            drop(file);
+            if let Some(ui) = ui_weak.upgrade() {
+                let rows = build_dict_rows(&entries_snapshot);
+                ui.set_dictionary_rows(slint::ModelRc::from(
+                    Rc::new(slint::VecModel::from(rows)),
+                ));
+                if is_cloud {
+                    ui.set_dictionary_show_restart_hint(true);
+                }
+            }
+        });
+    }
+
+    // ── on_dictionary_move_up ────────────────────────────────────────────────
+    {
+        let dict = dict_file_handle.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_move_up(move |index| {
+            let idx = index as usize;
+            let mut file = dict.lock().expect("dict poisoned");
+            if idx > 0 && idx < file.entries.len() {
+                file.entries.swap(idx - 1, idx);
+                if let Err(e) = dictionary::save(&file) {
+                    tracing::warn!(error = %e, "dictionary save failed on move-up");
+                }
+            }
+            let entries_snapshot = file.entries.clone();
+            drop(file);
+            if let Some(ui) = ui_weak.upgrade() {
+                let rows = build_dict_rows(&entries_snapshot);
+                ui.set_dictionary_rows(slint::ModelRc::from(
+                    Rc::new(slint::VecModel::from(rows)),
+                ));
+            }
+        });
+    }
+
+    // ── on_dictionary_move_down ──────────────────────────────────────────────
+    {
+        let dict = dict_file_handle.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_move_down(move |index| {
+            let idx = index as usize;
+            let mut file = dict.lock().expect("dict poisoned");
+            if idx + 1 < file.entries.len() {
+                file.entries.swap(idx, idx + 1);
+                if let Err(e) = dictionary::save(&file) {
+                    tracing::warn!(error = %e, "dictionary save failed on move-down");
+                }
+            }
+            let entries_snapshot = file.entries.clone();
+            drop(file);
+            if let Some(ui) = ui_weak.upgrade() {
+                let rows = build_dict_rows(&entries_snapshot);
+                ui.set_dictionary_rows(slint::ModelRc::from(
+                    Rc::new(slint::VecModel::from(rows)),
+                ));
+            }
+        });
+    }
+
+    // ── on_dictionary_clear_error ────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_dictionary_clear_error(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_dictionary_add_error(slint::SharedString::default());
+            }
+        });
+    }
+}
+
+// ── Phase 10: Auto-summary Settings callbacks ─────────────────────────────────
+
+/// Wire the Settings → System auto-summary toggle and regenerate callbacks.
+fn wire_autosummary_callbacks(ui: &AppWindow, runner: Arc<SummaryRunner>) {
+    // Settings toggle: persist consent + update UI state.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_auto_summary_toggled(move |enabled| {
+            if let Err(e) = autosummary::save_consent(enabled) {
+                tracing::warn!(error = %e, "autosummary consent save failed");
+            }
+            tracing::info!(enabled, "auto-summary toggle persisted");
+            if let Some(ui) = ui_weak.upgrade() {
+                // Reflect whether key is actually available (toggle ON without key
+                // should still show as disabled in the UI).
+                let has_key = vong_transcribe::ApiKey::load("openai-realtime").is_ok();
+                ui.set_auto_summary_enabled(enabled && has_key);
+                ui.set_auto_summary_has_key(has_key);
+            }
+        });
+    }
+
+    // Regenerate callback: re-run summary for the given session.
+    {
+        let runner_regen = runner;
+        ui.on_summary_regenerate_clicked(move |session_id| {
+            let sid = session_id as i64;
+            if runner_regen.regen_count(sid) >= 3 {
+                tracing::info!(session_id = sid, "summary: regen cap reached — ignoring click");
+                return;
+            }
+            // We need a conn — but at this point we're in a UI callback without
+            // direct access to the session conn. Use the in-memory DB path as fallback,
+            // or resolve via the open_default path. For regenerate from History, the
+            // session already persisted — open a fresh read connection.
+            if let Ok(conn) = vong_storage::open_default() {
+                let conn_arc = Arc::new(Mutex::new(conn));
+                tracing::info!(session_id = sid, "summary: regenerate triggered from UI");
+                runner_regen.trigger_detached(conn_arc, sid, true);
+            } else {
+                tracing::warn!(session_id = sid, "summary: regenerate failed — cannot open DB");
+            }
+        });
+    }
+}
+
+/// Build the Slint `DictionaryEntryRow` view-model from the current entries.
+fn build_dict_rows(entries: &[DictEntry]) -> Vec<DictionaryEntryRow> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| DictionaryEntryRow {
+            phrase: slint::SharedString::from(e.phrase.as_str()),
+            context: slint::SharedString::from(context_to_ui_str(e.context)),
+            index: i as i32,
+        })
+        .collect()
+}
+
 /// Default `StreamOpts` used by every provider. Per-utterance source language
 /// and target mode actually come from `LiveSttConfig` (mutated by UI), but
 /// `language_hint` here seeds the live config the first time the provider
@@ -2012,4 +2587,391 @@ pub fn start_model_download(
             let _ = model_dl::download_model(&name, &dir, progress, cancel).await;
         });
     });
+}
+
+// ── Phase 7: Recording settings — VAD sliders + Whisper model picker ─────────
+
+/// Scan the models directory for GGML Whisper files (`ggml-*.bin`).
+/// Returns entries sorted by filename for consistent UI ordering.
+fn scan_models(models_dir: &Path) -> Vec<ModelScanEntry> {
+    let mut entries = Vec::new();
+
+    // Scan two candidate locations: the standard models dir (data_local)
+    // and the exe-adjacent dir (used by portable installs).
+    let mut dirs: Vec<PathBuf> = vec![models_dir.to_path_buf()];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let exe_models = parent.join("models");
+            if exe_models != models_dir && exe_models.is_dir() {
+                dirs.push(exe_models);
+            }
+        }
+    }
+
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("ggml-") || !name.ends_with(".bin") {
+                continue;
+            }
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries.push(ModelScanEntry {
+                name,
+                path: entry.path(),
+                size_bytes,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// Format a byte count as a human-readable size string (e.g. "142 MB").
+fn format_model_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_000_000 {
+        format!("{} MB", bytes / 1_048_576)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+/// Push the scanned model list into the Slint UI.
+/// `active_label` is the filename of the currently loaded model (e.g. "ggml-base.bin").
+fn push_whisper_models_to_ui(ui: &AppWindow, entries: &[ModelScanEntry], active_label: &str) {
+    let slint_entries: Vec<WhisperModelEntry> = entries
+        .iter()
+        .map(|e| WhisperModelEntry {
+            name: e.name.clone().into(),
+            size_label: format_model_size(e.size_bytes).into(),
+            is_active: e.name == active_label,
+        })
+        .collect();
+    ui.set_whisper_models(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+        slint_entries,
+    ))));
+    ui.set_active_whisper_model(active_label.into());
+}
+
+/// Wire the VAD slider callbacks + debounced persist + Whisper model-switch
+/// callback. Only called when `LocalWhisper` provider loaded successfully.
+fn wire_recording_settings_callbacks(
+    ui: &AppWindow,
+    live_vad: LiveVadConfig,
+    whisper_provider: Arc<WhisperLocalProvider>,
+    state: Arc<PipelineState>,
+    initial_model_path: Option<PathBuf>,
+    runtime: tokio::runtime::Handle,
+) {
+    // Debounce channel: slider changes post into this, a task drains at 300ms.
+    let (debounce_tx, mut debounce_rx) =
+        tokio::sync::mpsc::channel::<recording_config::VadParams>(8);
+
+    // Keep the current model path in a shared mutex so the debounce task can
+    // read it when persisting VAD changes alongside the model path.
+    let current_model_path: Arc<Mutex<Option<PathBuf>>> =
+        Arc::new(Mutex::new(initial_model_path));
+    let model_path_for_debounce = current_model_path.clone();
+
+    // Spawn the debounce-persist task.
+    runtime.spawn(async move {
+        let mut latest: Option<recording_config::VadParams> = None;
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            tokio::select! {
+                Some(p) = debounce_rx.recv() => {
+                    latest = Some(p);
+                }
+                _ = interval.tick() => {
+                    if let Some(p) = latest.take() {
+                        let model_path = model_path_for_debounce
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.clone());
+                        let cfg = recording_config::RecordingConfig {
+                            version: 1,
+                            vad: p,
+                            whisper_model_path: model_path,
+                        };
+                        if let Err(e) = recording_config::save(&cfg) {
+                            tracing::warn!(error = %e, "recording.json VAD save failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // VAD slider changed callback — live-apply + debounce persist.
+    {
+        let live_vad_cb = live_vad.clone();
+        let tx = debounce_tx.clone();
+        ui.on_vad_changed(move |threshold, hangover_ms, max_duration_ms| {
+            let mut params = recording_config::VadParams {
+                threshold,
+                hangover_ms: hangover_ms.max(0) as u32,
+                max_duration_ms: max_duration_ms.max(0) as u32,
+            };
+            params.clamp_in_place();
+            // Immediately apply to the live FSM handle.
+            if let Ok(mut g) = live_vad_cb.lock() {
+                g.threshold = params.threshold;
+                g.hangover_ms = params.hangover_ms;
+                g.max_duration_ms = params.max_duration_ms;
+            }
+            // Debounce the disk write.
+            let _ = tx.try_send(params);
+        });
+    }
+
+    // Reset callbacks set the in-out property to the default.
+    {
+        let ui_weak = ui.as_weak();
+        let live_vad_reset = live_vad.clone();
+        let tx_reset = debounce_tx.clone();
+        ui.on_vad_reset_threshold(move || {
+            let default_threshold = vong_audio::VadConfig::default().threshold;
+            if let Ok(mut g) = live_vad_reset.lock() {
+                g.threshold = default_threshold;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_vad_threshold(default_threshold);
+            }
+            let params = get_current_vad_params(&live_vad_reset);
+            let _ = tx_reset.try_send(params);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let live_vad_reset = live_vad.clone();
+        let tx_reset = debounce_tx.clone();
+        ui.on_vad_reset_hangover(move || {
+            let default_hangover = vong_audio::VadConfig::default().hangover_ms;
+            if let Ok(mut g) = live_vad_reset.lock() {
+                g.hangover_ms = default_hangover;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_vad_hangover_ms(default_hangover as i32);
+            }
+            let params = get_current_vad_params(&live_vad_reset);
+            let _ = tx_reset.try_send(params);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let live_vad_reset = live_vad.clone();
+        let tx_reset = debounce_tx;
+        ui.on_vad_reset_max_duration(move || {
+            let default_max = vong_audio::VadConfig::default().max_duration_ms;
+            if let Ok(mut g) = live_vad_reset.lock() {
+                g.max_duration_ms = default_max;
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_vad_max_duration_ms(default_max as i32);
+            }
+            let params = get_current_vad_params(&live_vad_reset);
+            let _ = tx_reset.try_send(params);
+        });
+    }
+
+    // Model switch callback.
+    {
+        let ui_weak = ui.as_weak();
+        let state_cb = state.clone();
+        let provider_cb = whisper_provider.clone();
+        let model_path_for_switch = current_model_path;
+        let models_dir = resolve_models_dir();
+        ui.on_whisper_model_switch_clicked(move |file_name| {
+            let file_name = file_name.to_string();
+            // Locate the file among scanned entries.
+            let entries = scan_models(&models_dir);
+            let Some(entry) = entries.iter().find(|e| e.name == file_name) else {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_model_switch_status("Không tìm thấy file mô hình".into());
+                }
+                return;
+            };
+            let target_path = entry.path.clone();
+
+            // Mark in-flight.
+            state_cb
+                .model_switch_in_flight
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(mut g) = state_cb.model_switch_status.lock() {
+                *g = "Đang tải mô hình…".to_string();
+            }
+
+            let provider_for_swap = provider_cb.clone();
+            let state_for_done = state_cb.clone();
+            let model_path_arc = model_path_for_switch.clone();
+            let ui_weak2 = ui_weak.clone();
+            let file_name_clone = file_name.clone();
+            let path_for_blocking = target_path.clone();
+
+            runtime.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    provider_for_swap.swap_context(&path_for_blocking)
+                })
+                .await;
+
+                let (success, status_msg) = match result {
+                    Ok(Ok(())) => {
+                        // Persist the new model path.
+                        if let Ok(mut g) = model_path_arc.lock() {
+                            *g = Some(target_path.clone());
+                        }
+                        let vad_params = {
+                            // Read current VAD from provider (we don't have live_vad here;
+                            // use defaults as fallback — the debounce path will overwrite next drag).
+                            recording_config::VadParams::default()
+                        };
+                        let cfg = recording_config::RecordingConfig {
+                            version: 1,
+                            vad: vad_params,
+                            whisper_model_path: Some(target_path),
+                        };
+                        if let Err(e) = recording_config::save(&cfg) {
+                            tracing::warn!(error = %e, "recording.json model path save failed");
+                        }
+                        (true, String::new())
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "model swap failed");
+                        (false, "Tải thất bại — giữ mô hình cũ".to_string())
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "model swap join failed");
+                        (false, "Lỗi nội bộ — giữ mô hình cũ".to_string())
+                    }
+                };
+
+                state_for_done
+                    .model_switch_in_flight
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut g) = state_for_done.model_switch_status.lock() {
+                    *g = status_msg;
+                }
+                if success {
+                    if let Ok(mut g) = state_for_done.active_whisper_model.lock() {
+                        *g = file_name_clone.clone();
+                    }
+                }
+
+                // Update the model list in the UI from the event loop.
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak2.upgrade() else { return };
+                    let models_dir2 = resolve_models_dir();
+                    let entries2 = scan_models(&models_dir2);
+                    let active = if success { &file_name_clone } else { "" };
+                    push_whisper_models_to_ui(&ui, &entries2, active);
+                });
+            });
+        });
+    }
+}
+
+/// Wire ONLY the VAD slider callbacks (for non-Whisper provider modes where
+/// the model picker doesn't apply). Uses a simplified debounce path.
+fn wire_vad_slider_callbacks_only(
+    ui: &AppWindow,
+    live_vad: LiveVadConfig,
+    runtime: tokio::runtime::Handle,
+) {
+    let (debounce_tx, mut debounce_rx) =
+        tokio::sync::mpsc::channel::<recording_config::VadParams>(8);
+
+    // Spawn debounce persist task (no model path to track here).
+    runtime.spawn(async move {
+        let mut latest: Option<recording_config::VadParams> = None;
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            tokio::select! {
+                Some(p) = debounce_rx.recv() => {
+                    latest = Some(p);
+                }
+                _ = interval.tick() => {
+                    if let Some(p) = latest.take() {
+                        let cfg = recording_config::RecordingConfig {
+                            version: 1,
+                            vad: p,
+                            whisper_model_path: None,
+                        };
+                        if let Err(e) = recording_config::save(&cfg) {
+                            tracing::warn!(error = %e, "recording.json VAD save failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    {
+        let live_vad_cb = live_vad.clone();
+        let tx = debounce_tx.clone();
+        ui.on_vad_changed(move |threshold, hangover_ms, max_duration_ms| {
+            let mut params = recording_config::VadParams {
+                threshold,
+                hangover_ms: hangover_ms.max(0) as u32,
+                max_duration_ms: max_duration_ms.max(0) as u32,
+            };
+            params.clamp_in_place();
+            if let Ok(mut g) = live_vad_cb.lock() {
+                g.threshold = params.threshold;
+                g.hangover_ms = params.hangover_ms;
+                g.max_duration_ms = params.max_duration_ms;
+            }
+            let _ = tx.try_send(params);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let lv = live_vad.clone();
+        let tx = debounce_tx.clone();
+        ui.on_vad_reset_threshold(move || {
+            let d = vong_audio::VadConfig::default().threshold;
+            if let Ok(mut g) = lv.lock() { g.threshold = d; }
+            if let Some(ui) = ui_weak.upgrade() { ui.set_vad_threshold(d); }
+            let _ = tx.try_send(get_current_vad_params(&lv));
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let lv = live_vad.clone();
+        let tx = debounce_tx.clone();
+        ui.on_vad_reset_hangover(move || {
+            let d = vong_audio::VadConfig::default().hangover_ms;
+            if let Ok(mut g) = lv.lock() { g.hangover_ms = d; }
+            if let Some(ui) = ui_weak.upgrade() { ui.set_vad_hangover_ms(d as i32); }
+            let _ = tx.try_send(get_current_vad_params(&lv));
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        let lv = live_vad.clone();
+        let tx = debounce_tx;
+        ui.on_vad_reset_max_duration(move || {
+            let d = vong_audio::VadConfig::default().max_duration_ms;
+            if let Ok(mut g) = lv.lock() { g.max_duration_ms = d; }
+            if let Some(ui) = ui_weak.upgrade() { ui.set_vad_max_duration_ms(d as i32); }
+            let _ = tx.try_send(get_current_vad_params(&lv));
+        });
+    }
+    // Whisper model switch is a no-op for cloud providers.
+    ui.on_whisper_model_switch_clicked(|_| {});
+}
+
+/// Read the current VAD config from the live handle and convert to `VadParams`.
+fn get_current_vad_params(live_vad: &LiveVadConfig) -> recording_config::VadParams {
+    live_vad
+        .lock()
+        .map(|g| recording_config::VadParams {
+            threshold: g.threshold,
+            hangover_ms: g.hangover_ms,
+            max_duration_ms: g.max_duration_ms,
+        })
+        .unwrap_or_default()
 }

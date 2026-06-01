@@ -8,7 +8,7 @@ use crate::api_key::ApiKey;
 use crate::error::SttError;
 use crate::events::TranscriptEvent;
 use crate::reconnect::ExponentialBackoff;
-use crate::soniox_protocol::{ConfigMessage, TokenMessage, TranslationConfig};
+use crate::soniox_protocol::{ConfigMessage, SonioxContext, TokenMessage, TranslationConfig};
 use crate::traits::{StreamOpts, StreamingTranscriber};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -42,6 +42,12 @@ pub struct SonioxProvider {
     api_key: ApiKey,
     ws_url: String,
     model: String,
+    /// Pre-built dictionary terms injected into the `context.terms` field of
+    /// the Soniox config message at session open. Populated from the user's
+    /// custom vocabulary dictionary at startup.
+    ///
+    /// Privacy: never log this field's contents — user data.
+    dictionary_terms: Vec<String>,
 }
 
 impl SonioxProvider {
@@ -51,6 +57,7 @@ impl SonioxProvider {
             api_key,
             ws_url: DEFAULT_WS_URL.into(),
             model: DEFAULT_MODEL.into(),
+            dictionary_terms: Vec::new(),
         }
     }
 
@@ -63,6 +70,18 @@ impl SonioxProvider {
     /// Override model identifier.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Inject dictionary vocabulary terms.
+    ///
+    /// These are passed as `context.terms` in the Soniox config message and
+    /// bias the recognition toward the listed phrases. Applied once at session
+    /// open — changing the dictionary after session start requires a restart.
+    ///
+    /// Privacy: term strings are user content — never log them.
+    pub fn with_dictionary_terms(mut self, terms: Vec<String>) -> Self {
+        self.dictionary_terms = terms;
         self
     }
 
@@ -148,6 +167,22 @@ impl SonioxProvider {
     }
 
     fn build_config(&self, opts: &StreamOpts) -> ConfigMessage {
+        // Build context only when dictionary is non-empty so the wire message
+        // is identical to the pre-Phase-8 baseline when no dictionary is set.
+        // Privacy: only log the entry count, never the terms themselves.
+        let context = if self.dictionary_terms.is_empty() {
+            tracing::debug!("Soniox build_config: no dictionary terms");
+            None
+        } else {
+            tracing::debug!(
+                dict_entry_count = self.dictionary_terms.len(),
+                "Soniox build_config: dictionary context injected"
+            );
+            Some(SonioxContext {
+                terms: self.dictionary_terms.clone(),
+            })
+        };
+
         ConfigMessage {
             api_key: self.api_key.expose().to_string(),
             model: self.model.clone(),
@@ -164,6 +199,7 @@ impl SonioxProvider {
                     mode: "one_way".into(),
                     target_language: t.clone(),
                 }),
+            context,
         }
     }
 }
@@ -384,6 +420,27 @@ mod tests {
         assert_eq!(cfg.sample_rate, 16_000);
         assert_eq!(cfg.num_channels, 1);
         assert!(cfg.translation.is_none());
+        // Empty dictionary → context should be None (wire-compatible with pre-Phase-8)
+        assert!(cfg.context.is_none());
+    }
+
+    #[test]
+    fn build_config_with_dictionary_terms() {
+        let provider = SonioxProvider::new(ApiKey::from_raw("test-key".into()))
+            .with_dictionary_terms(vec!["OKR".into(), "Vọng".into()]);
+        let opts = StreamOpts::default();
+        let cfg = provider.build_config(&opts);
+        let ctx = cfg.context.expect("context must be set when dictionary is non-empty");
+        assert_eq!(ctx.terms, vec!["OKR", "Vọng"]);
+    }
+
+    #[test]
+    fn build_config_empty_dictionary_omits_context() {
+        let provider = SonioxProvider::new(ApiKey::from_raw("test-key".into()))
+            .with_dictionary_terms(vec![]);
+        let opts = StreamOpts::default();
+        let cfg = provider.build_config(&opts);
+        assert!(cfg.context.is_none(), "empty dict must not emit context field");
     }
 
     #[test]

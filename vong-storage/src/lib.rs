@@ -19,10 +19,11 @@ mod search;
 pub use db::{default_db_path, open_at, open_default, open_in_memory};
 pub use error::StorageError;
 pub use export::{export_markdown, export_srt, export_text};
-pub use models::{normalize, NewSegment, NewSession, SearchHit, Segment, Session};
+pub use models::{normalize, NewSegment, NewSession, NewSummary, SearchHit, Segment, Session, Summary};
 pub use repository::{
-    delete_session, fetch_segments_for_session, fetch_session, finalize_session, insert_segment,
-    insert_session, list_recent_sessions,
+    delete_session, delete_summaries_for_session, fetch_latest_summary, fetch_segments_for_session,
+    fetch_session, finalize_session, insert_segment, insert_session, insert_summary,
+    list_recent_sessions,
 };
 pub use search::search_transcripts;
 

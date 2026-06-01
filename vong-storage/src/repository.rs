@@ -1,6 +1,6 @@
 //! CRUD operations.
 use crate::error::StorageError;
-use crate::models::{normalize, NewSegment, NewSession, Segment, Session};
+use crate::models::{normalize, NewSegment, NewSession, NewSummary, Segment, Session, Summary};
 use rusqlite::{params, Connection};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,4 +102,57 @@ pub fn delete_session(conn: &Connection, id: i64) -> Result<(), StorageError> {
         return Err(StorageError::SessionNotFound(id));
     }
     Ok(())
+}
+
+/// Insert a new summary row. Returns the row id.
+pub fn insert_summary(conn: &Connection, s: &NewSummary) -> Result<i64, StorageError> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO summaries (session_id, kind, llm_provider, llm_model, content, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![s.session_id, s.kind, s.llm_provider, s.llm_model, s.content, now_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Fetch the most-recent summary row for a session, if any.
+pub fn fetch_latest_summary(
+    conn: &Connection,
+    session_id: i64,
+) -> Result<Option<Summary>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, kind, llm_provider, llm_model, content, created_at
+         FROM summaries WHERE session_id = ?1 ORDER BY id DESC LIMIT 1",
+    )?;
+    let result = stmt.query_row([session_id], |row| {
+        Ok(Summary {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            kind: row.get(2)?,
+            llm_provider: row.get(3)?,
+            llm_model: row.get(4)?,
+            content: row.get(5)?,
+            created_at_ms: row.get(6)?,
+        })
+    });
+    match result {
+        Ok(s) => Ok(Some(s)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(StorageError::Sqlite(e)),
+    }
+}
+
+/// Delete all summary rows for a session. Used before regenerating.
+pub fn delete_summaries_for_session(
+    conn: &Connection,
+    session_id: i64,
+) -> Result<usize, StorageError> {
+    let n = conn.execute(
+        "DELETE FROM summaries WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(n)
 }

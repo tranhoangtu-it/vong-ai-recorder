@@ -51,6 +51,7 @@ mod openai_realtime;
 mod reconnect;
 mod soniox;
 mod soniox_protocol;
+pub mod summary;
 mod traits;
 mod whisper_local;
 
@@ -65,9 +66,12 @@ pub use openai_realtime::OpenAIRealtimeProvider;
 pub use reconnect::ExponentialBackoff;
 pub use soniox::SonioxProvider;
 pub use traits::{
+    build_openai_instructions, build_soniox_terms, build_whisper_prompt, DictContext, DictEntry,
     LiveConfigHandle, LiveSttConfig, ProviderMode, StreamOpts, StreamingTranscriber, TargetMode,
+    MAX_DICTIONARY_ENTRIES, PHRASE_MAX_BYTES,
 };
 pub use whisper_local::{WhisperLocalProvider, DEFAULT_MODEL_FILENAME};
+pub use summary::{generate_summary, truncate_transcript, SummaryError, SummaryResponse};
 
 /// Crate version.
 pub fn version() -> &'static str {

@@ -5,7 +5,7 @@
 // removed — too low-signal next to the main UI.
 // Design tokens mirror `docs/design.md`.
 
-import { VerticalBox, HorizontalBox, LineEdit, ComboBox, ScrollView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, ComboBox, ScrollView, Slider } from "std-widgets.slint";
 import { WizardOverlay } from "wizard.slint";
 
 // Soniox-style transcript line — single utterance with timestamp + language tag.
@@ -397,6 +397,101 @@ component RecordButton inherits Rectangle {
 
 // STT engine / provider picker card for the sidebar.
 //
+// ── Phase 9: Crash reporting toggle card ─────────────────────────────────────
+
+component CrashReportCard inherits Rectangle {
+    // Whether crash reporting is currently enabled (read from consent file at startup).
+    in-out property <bool> crash-report-enabled: false;
+    // True after the user toggles — shows "restart required" hint.
+    in property <bool> show-restart-hint: false;
+    // Fired when the toggle changes; Rust writes sentry.txt.
+    callback toggled(bool);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Báo cáo lỗi (Sentry)";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "Gửi báo cáo crash ẩn danh khi ứng dụng gặp lỗi nghiêm trọng. Không bao gồm nội dung phiên ghi, audio, hay khoá API.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+
+        // Toggle row
+        toggle-row := TouchArea {
+            height: 36px;
+            clicked => {
+                root.crash-report-enabled = !root.crash-report-enabled;
+                root.toggled(root.crash-report-enabled);
+            }
+            HorizontalBox {
+                spacing: 12px;
+                alignment: space-between;
+
+                Text {
+                    text: root.crash-report-enabled ? "Đang bật" : "Đang tắt";
+                    font-size: Tokens.font-secondary;
+                    color: root.crash-report-enabled ? Tokens.success : Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+
+                // Visual toggle pill
+                Rectangle {
+                    width: 44px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: root.crash-report-enabled ? Tokens.accent : #404040;
+                    animate background { duration: 150ms; }
+                    y: (parent.height - self.height) / 2;
+
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: white;
+                        x: root.crash-report-enabled ? parent.width - self.width - 3px : 3px;
+                        y: (parent.height - self.height) / 2;
+                        animate x { duration: 150ms; easing: ease-in-out; }
+                    }
+                }
+            }
+        }
+
+        // Restart-required hint (appears after toggle)
+        if show-restart-hint: Text {
+            text: "Đã lưu — hiệu lực sau khi khởi động lại Vọng AI Recorder.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// ── Provider card ─────────────────────────────────────────────────────────────
+//
 // Whisper local is the offline default. Cloud providers (Soniox, OpenAI
 // Realtime) give true word-by-word streaming partials but need an API key
 // stored in the OS Keychain (BYOK). The save button writes the key via
@@ -783,6 +878,720 @@ component SettingsPlaceholder inherits Rectangle {
 // `*-card` properties hand the existing config cards (audio source,
 // provider, language) down so the settings tabs reuse them — no
 // duplication, just relocation from the main sidebar.
+
+// ── Phase 7: Recording settings — VAD sliders + Whisper model picker ────────
+
+/// Entry in the Whisper model picker — one row per ggml-*.bin file on disk.
+export struct WhisperModelEntry {
+    name: string,          // "ggml-base.bin"
+    size-label: string,    // "142 MB"
+    is-active: bool,       // true = currently loaded
+}
+
+/// One row in VadSlidersCard: label / slider / value readout / reset button.
+component VadSliderRow inherits Rectangle {
+    in property <string> label;
+    in property <float>  slider-value;
+    in property <float>  min-val;
+    in property <float>  max-val;
+    in property <string> display-value;
+    callback changed(float);
+    callback reset();
+
+    height: 36px;
+    background: transparent;
+
+    HorizontalBox {
+        spacing: 8px;
+        alignment: start;
+
+        Text {
+            text: root.label;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            width: 120px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        slider := Slider {
+            horizontal-stretch: 1;
+            minimum: root.min-val;
+            maximum: root.max-val;
+            value: root.slider-value;
+            changed(v) => { root.changed(v); }
+        }
+
+        Text {
+            text: root.display-value;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-primary;
+            width: 52px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+
+        reset-btn := TouchArea {
+            width: 28px;
+            height: 28px;
+            clicked => { root.reset(); }
+            Rectangle {
+                background: reset-btn.has-hover ? Tokens.surface-hover : transparent;
+                border-radius: 4px;
+                animate background { duration: 80ms; }
+                Text {
+                    text: "↺";
+                    font-size: Tokens.font-secondary;
+                    color: reset-btn.has-hover ? Tokens.accent : Tokens.text-hint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    animate color { duration: 80ms; }
+                }
+            }
+        }
+    }
+}
+
+/// Card: three VAD sensitivity sliders with live-apply + reset-to-default.
+component VadSlidersCard inherits Rectangle {
+    in-out property <float> threshold: 0.65;
+    in-out property <int>   hangover-ms: 200;
+    in-out property <int>   max-duration-ms: 8000;
+    callback changed(float, int, int);
+    callback reset-threshold();
+    callback reset-hangover();
+    callback reset-max-duration();
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Voice Activity Detection";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        VadSliderRow {
+            label: "Ngưỡng (threshold)";
+            slider-value: root.threshold;
+            min-val: 0.30;
+            max-val: 0.95;
+            display-value: round(root.threshold * 100) / 100 + "";
+            changed(v) => {
+                root.threshold = round(v * 20.0) / 20.0;
+                root.changed(root.threshold, root.hangover-ms, root.max-duration-ms);
+            }
+            reset => { root.reset-threshold(); }
+        }
+
+        VadSliderRow {
+            label: "Hangover (ms)";
+            slider-value: root.hangover-ms;
+            min-val: 100;
+            max-val: 800;
+            display-value: root.hangover-ms + " ms";
+            changed(v) => {
+                root.hangover-ms = round(v / 50) * 50;
+                root.changed(root.threshold, root.hangover-ms, root.max-duration-ms);
+            }
+            reset => { root.reset-hangover(); }
+        }
+
+        VadSliderRow {
+            label: "Tối đa (ms)";
+            slider-value: root.max-duration-ms;
+            min-val: 3000;
+            max-val: 15000;
+            display-value: root.max-duration-ms / 1000 + " s";
+            changed(v) => {
+                root.max-duration-ms = round(v / 1000) * 1000;
+                root.changed(root.threshold, root.hangover-ms, root.max-duration-ms);
+            }
+            reset => { root.reset-max-duration(); }
+        }
+
+        Text {
+            text: "partial-emit và frame-size là hằng số giao thức — không điều chỉnh được.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+    }
+}
+
+/// Card: Whisper model picker for LocalWhisper provider.
+/// Hidden (replaced by a hint) when the active provider is Soniox/OpenAI.
+component WhisperModelCard inherits Rectangle {
+    in property <[WhisperModelEntry]> entries;
+    in property <string>              active;
+    in property <bool>                switch-in-flight: false;
+    in property <string>              switch-status: "";
+    in property <bool>                provider-is-local-whisper: true;
+    callback switch-clicked(string);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Mô hình Whisper";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        if !root.provider-is-local-whisper: Text {
+            text: "Chỉ áp dụng cho Whisper cục bộ — đang dùng cloud provider.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+
+        if root.provider-is-local-whisper && root.entries.length == 0: Text {
+            text: "Chưa tìm thấy file mô hình. Tải về qua wizard hoặc đặt file vào thư mục models/.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+
+        if root.provider-is-local-whisper: VerticalLayout {
+            spacing: 4px;
+
+            for entry in root.entries: Rectangle {
+                background: entry.is-active ? #1e1333 : Tokens.surface-hover;
+                border-radius: 6px;
+                border-width: entry.is-active ? 1px : 0px;
+                border-color: Tokens.accent;
+                height: 40px;
+
+                HorizontalBox {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+                    alignment: space-between;
+
+                    HorizontalBox {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: entry.name;
+                            font-size: Tokens.font-secondary;
+                            color: entry.is-active ? Tokens.accent : Tokens.text-primary;
+                            vertical-alignment: center;
+                            font-weight: entry.is-active ? 600 : 400;
+                        }
+                        Text {
+                            text: entry.size-label;
+                            font-size: Tokens.font-caption;
+                            color: Tokens.text-hint;
+                            vertical-alignment: center;
+                        }
+                        if entry.is-active: Text {
+                            text: "✓ Đã tải";
+                            font-size: Tokens.font-caption;
+                            color: Tokens.success;
+                            vertical-alignment: center;
+                            font-weight: 600;
+                        }
+                    }
+
+                    if !entry.is-active && !root.switch-in-flight: switch-btn := TouchArea {
+                        width: 68px;
+                        height: 28px;
+                        clicked => { root.switch-clicked(entry.name); }
+                        Rectangle {
+                            background: switch-btn.has-hover ? Tokens.accent : #6d3fe0;
+                            border-radius: 4px;
+                            animate background { duration: 100ms; }
+                            Text {
+                                text: "Switch";
+                                font-size: Tokens.font-caption;
+                                font-weight: 600;
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if root.switch-in-flight: Text {
+                        text: "⏳";
+                        font-size: Tokens.font-secondary;
+                        color: Tokens.text-hint;
+                        vertical-alignment: center;
+                        width: 68px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if root.switch-in-flight: Text {
+            text: "Đang tải mô hình…";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+        }
+
+        if root.switch-status != "": Text {
+            text: root.switch-status;
+            font-size: Tokens.font-caption;
+            color: root.switch-status == "Đang tải mô hình…" ? Tokens.text-secondary : Tokens.danger;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// ── Phase 10: Auto-summary card for Settings → System tab ────────────────
+
+/// Card: auto-summary toggle with privacy disclosure.
+/// Placed BELOW Phase 9's CrashReportCard in the System tab VerticalLayout.
+component AutoSummaryCard inherits Rectangle {
+    in property <bool> auto-summary-enabled: false;
+    in property <bool> auto-summary-has-key: false;
+    callback auto-summary-toggled(bool);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Tóm tắt phiên (AI)";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalBox {
+            spacing: 12px;
+            alignment: space-between;
+
+            Text {
+                text: "Tự động tóm tắt sau khi dừng ghi âm";
+                font-size: Tokens.font-caption;
+                color: root.auto-summary-has-key ? Tokens.text-primary : Tokens.text-hint;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            toggle-area := TouchArea {
+                width: 44px;
+                height: 24px;
+                enabled: root.auto-summary-has-key;
+                clicked => {
+                    if root.auto-summary-has-key {
+                        root.auto-summary-toggled(!root.auto-summary-enabled);
+                    }
+                }
+                Rectangle {
+                    background: root.auto-summary-enabled && root.auto-summary-has-key
+                        ? Tokens.accent : Tokens.border;
+                    border-radius: 12px;
+                    animate background { duration: 150ms; }
+                    Rectangle {
+                        x: root.auto-summary-enabled && root.auto-summary-has-key
+                            ? parent.width - self.width - 2px : 2px;
+                        y: 2px;
+                        width: 20px; height: 20px; border-radius: 10px;
+                        background: white;
+                        animate x { duration: 150ms; }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "Sử dụng gpt-4o-mini · ~3-8 giây · ~$0.0006/phiên 30 phút";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+
+        if !root.auto-summary-has-key: Text {
+            text: "Cấu hình API key OpenAI trong Cài đặt → System để bật tóm tắt.";
+            font-size: Tokens.font-caption;
+            color: Tokens.danger;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            background: #1a0f2e;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #3d2472;
+
+            VerticalBox {
+                padding: 10px;
+                spacing: 4px;
+                Text {
+                    text: "Quyền riêng tư";
+                    font-size: Tokens.font-caption;
+                    font-weight: 600;
+                    color: #c4b5fd;
+                }
+                Text {
+                    text: "Tự động tóm tắt sẽ gửi nội dung phiên ghi sang OpenAI để tạo tóm tắt. Khoá API của bạn được dùng cho cuộc gọi này. Không bật nếu nội dung phiên là nhạy cảm.";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-secondary;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ── Phase 8: Dictionary entry view-model ─────────────────────────────────
+// One row in the dictionary list. Index is the 0-based position used by callbacks.
+struct DictionaryEntryRow {
+    phrase: string,
+    context: string,   // "common" | "names" | "technical"
+    index: int,
+}
+
+// ── Phase 8: DictionaryCard component ────────────────────────────────────
+component DictionaryCard inherits Rectangle {
+    // Data
+    in property <[DictionaryEntryRow]> entries;
+    in property <int> entry-count: 0;
+    in property <string> add-error: "";
+    in property <bool> show-restart-hint: false;
+
+    // "Add entry" form
+    in-out property <string> pending-phrase: "";
+    in-out property <string> pending-context: "common";
+
+    // Callbacks fired to Rust
+    callback add(string, string);
+    callback delete(int);
+    callback edit(int, string, string);
+    callback move-up(int);
+    callback move-down(int);
+    callback clear-error();
+
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 12px;
+        padding: 0px;
+        alignment: start;
+
+        // ── Header: title + count ────────────────────────────────────────────
+        HorizontalBox {
+            alignment: space-between;
+            Text {
+                text: "Từ điển tùy chỉnh";
+                font-size: Tokens.font-h2;
+                font-weight: 700;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+            Text {
+                text: entry-count + " / 100";
+                font-size: Tokens.font-secondary;
+                color: entry-count >= 100 ? Tokens.danger : Tokens.text-hint;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "Thêm thuật ngữ chuyên ngành, tên riêng, viết tắt để STT nhận diện chính xác hơn.";
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+
+        // ── Restart hint (Soniox / OpenAI only) ──────────────────────────────
+        if root.show-restart-hint: Rectangle {
+            background: #1e1333;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Tokens.accent;
+            height: 36px;
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                alignment: center;
+                Text {
+                    text: "Áp dụng từ phiên ghi âm tiếp theo (cần khởi động lại Vọng cho Soniox / OpenAI).";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.accent;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // ── Add-entry form ────────────────────────────────────────────────────
+        Rectangle {
+            background: Tokens.surface;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Tokens.border;
+            height: 52px;
+
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                alignment: stretch;
+
+                phrase-input := LineEdit {
+                    placeholder-text: "Thêm thuật ngữ…";
+                    text <=> root.pending-phrase;
+                    horizontal-stretch: 1;
+                    accepted => {
+                        if root.pending-phrase != "" {
+                            root.add(root.pending-phrase, root.pending-context);
+                            root.pending-phrase = "";
+                        }
+                    }
+                }
+
+                ctx-combo := ComboBox {
+                    model: ["Chung", "Tên riêng", "Chuyên ngành"];
+                    current-value: root.pending-context == "names" ? "Tên riêng"
+                                 : root.pending-context == "technical" ? "Chuyên ngành"
+                                 : "Chung";
+                    width: 120px;
+                    selected(v) => {
+                        root.pending-context = v == "Tên riêng" ? "names"
+                                             : v == "Chuyên ngành" ? "technical"
+                                             : "common";
+                    }
+                }
+
+                add-btn := TouchArea {
+                    width: 80px;
+                    height: 32px;
+                    enabled: entry-count < 100 && root.pending-phrase != "";
+                    clicked => {
+                        if root.pending-phrase != "" {
+                            root.add(root.pending-phrase, root.pending-context);
+                            root.pending-phrase = "";
+                        }
+                    }
+                    Rectangle {
+                        background: add-btn.enabled
+                            ? (add-btn.has-hover ? Tokens.accent : #7c3aed)
+                            : Tokens.border;
+                        border-radius: 6px;
+                        width: parent.width;
+                        height: parent.height;
+                        Text {
+                            text: "+ Thêm";
+                            font-size: Tokens.font-secondary;
+                            font-weight: 600;
+                            color: add-btn.enabled ? Tokens.text-primary : Tokens.text-hint;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Inline validation error ───────────────────────────────────────────
+        if root.add-error != "": HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: root.add-error;
+                font-size: Tokens.font-caption;
+                color: Tokens.danger;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                width: 16px;
+                height: 16px;
+                clicked => { root.clear-error(); }
+                Text {
+                    text: "✕";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ── Empty-state illustration ──────────────────────────────────────────
+        if root.entry-count == 0: Rectangle {
+            background: Tokens.surface;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Tokens.border;
+            height: 80px;
+            Text {
+                text: "Chưa có từ vựng nào — thêm thuật ngữ chuyên ngành để Whisper / Soniox nhận diện chính xác hơn.";
+                font-size: Tokens.font-secondary;
+                color: Tokens.text-hint;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+
+        // ── Entry list ────────────────────────────────────────────────────────
+        if root.entry-count > 0: VerticalLayout {
+            spacing: 4px;
+
+            for row in root.entries: Rectangle {
+                background: Tokens.surface;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Tokens.border;
+                height: 44px;
+
+                HorizontalBox {
+                    padding-left: 12px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    alignment: space-between;
+
+                    // Phrase text
+                    Text {
+                        text: row.phrase;
+                        font-size: Tokens.font-secondary;
+                        color: Tokens.text-primary;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    // Context badge
+                    Rectangle {
+                        background: row.context == "names" ? #1a3a2a
+                                  : row.context == "technical" ? #1a1a3a
+                                  : #2a1a3a;
+                        border-radius: 4px;
+                        width: 80px;
+                        height: 22px;
+                        Text {
+                            text: row.context == "names" ? "Tên riêng"
+                                : row.context == "technical" ? "Chuyên ngành"
+                                : "Chung";
+                            font-size: 10px;
+                            color: row.context == "names" ? Tokens.success
+                                 : row.context == "technical" ? #8899ff
+                                 : Tokens.accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            font-weight: 600;
+                        }
+                    }
+
+                    // Up / Down / Delete buttons
+                    HorizontalBox {
+                        spacing: 2px;
+                        alignment: end;
+
+                        up-btn := TouchArea {
+                            width: 28px;
+                            height: 28px;
+                            clicked => { root.move-up(row.index); }
+                            Rectangle {
+                                background: up-btn.has-hover ? Tokens.surface-hover : transparent;
+                                border-radius: 4px;
+                                width: parent.width;
+                                height: parent.height;
+                                Text {
+                                    text: "↑";
+                                    font-size: 14px;
+                                    color: Tokens.text-hint;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        down-btn := TouchArea {
+                            width: 28px;
+                            height: 28px;
+                            clicked => { root.move-down(row.index); }
+                            Rectangle {
+                                background: down-btn.has-hover ? Tokens.surface-hover : transparent;
+                                border-radius: 4px;
+                                width: parent.width;
+                                height: parent.height;
+                                Text {
+                                    text: "↓";
+                                    font-size: 14px;
+                                    color: Tokens.text-hint;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        del-btn := TouchArea {
+                            width: 28px;
+                            height: 28px;
+                            clicked => { root.delete(row.index); }
+                            Rectangle {
+                                background: del-btn.has-hover ? #3a1a1a : transparent;
+                                border-radius: 4px;
+                                width: parent.width;
+                                height: parent.height;
+                                Text {
+                                    text: "🗑";
+                                    font-size: 14px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 component SettingsScreen inherits Rectangle {
     in-out property <string> current-tab;
 
@@ -808,6 +1617,47 @@ component SettingsScreen inherits Rectangle {
     in property <string> current-target-mode;
     callback source-language-changed(string);
     callback target-mode-changed(string);
+
+    // ─ Phase 7: VAD sliders
+    in-out property <float> vad-threshold: 0.65;
+    in-out property <int>   vad-hangover-ms: 200;
+    in-out property <int>   vad-max-duration-ms: 8000;
+    callback vad-changed(float, int, int);
+    callback vad-reset-threshold();
+    callback vad-reset-hangover();
+    callback vad-reset-max-duration();
+
+    // ─ Phase 7: Whisper model picker
+    in property <[WhisperModelEntry]> whisper-models: [];
+    in property <string>  active-whisper-model: "";
+    in property <bool>    model-switch-in-flight: false;
+    in property <string>  model-switch-status: "";
+    callback whisper-model-switch-clicked(string);
+
+    // ─ Phase 8: Dictionary custom vocabulary
+    in property <[DictionaryEntryRow]> dictionary-rows: [];
+    in property <int>    dictionary-entry-count: 0;
+    in-out property <string> dictionary-pending-phrase: "";
+    in-out property <string> dictionary-pending-context: "common";
+    in property <string> dictionary-add-error: "";
+    in property <bool>   dictionary-show-restart-hint: false;
+    callback dictionary-add(string, string);
+    callback dictionary-delete(int);
+    callback dictionary-edit(int, string, string);
+    callback dictionary-move-up(int);
+    callback dictionary-move-down(int);
+    callback dictionary-clear-error();
+
+    // ─ Phase 9: Crash reporting (Sentry)
+    in-out property <bool> crash-report-enabled: false;
+    in property <bool>     crash-report-restart-hint: false;
+    callback crash-reporting-toggled(bool);
+
+    // ─ Phase 10: Auto-summary
+    in property <bool> auto-summary-enabled: false;
+    in property <bool> auto-summary-has-key: false;
+    callback auto-summary-toggled(bool);
+    callback summary-regenerate-clicked(int);
 
     background: Tokens.bg;
 
@@ -901,6 +1751,22 @@ component SettingsScreen inherits Rectangle {
                             save-key(p, k) => { root.save-provider-key(p, k); }
                         }
 
+                        // ── Phase 9: Crash reporting (Sentry) ──────────────
+                        CrashReportCard {
+                            crash-report-enabled <=> root.crash-report-enabled;
+                            show-restart-hint: root.crash-report-restart-hint;
+                            toggled(v) => { root.crash-reporting-toggled(v); }
+                        }
+                        // ── end Phase 9 ─────────────────────────────────────
+
+                        // ── Phase 10: Auto-summary (OpenAI) ──────────────────
+                        AutoSummaryCard {
+                            auto-summary-enabled: root.auto-summary-enabled;
+                            auto-summary-has-key: root.auto-summary-has-key;
+                            auto-summary-toggled(v) => { root.auto-summary-toggled(v); }
+                        }
+                        // ── end Phase 10 ─────────────────────────────────────
+
                         // About card — version + tech stack + license
                         Rectangle {
                             background: Tokens.surface;
@@ -970,7 +1836,7 @@ component SettingsScreen inherits Rectangle {
                             color: Tokens.text-primary;
                         }
                         Text {
-                            text: "Nguồn âm thanh + tham số VAD";
+                            text: "Nguồn âm thanh, VAD, mô hình Whisper";
                             font-size: Tokens.font-secondary;
                             color: Tokens.text-secondary;
                         }
@@ -979,6 +1845,23 @@ component SettingsScreen inherits Rectangle {
                             current: root.current-audio-source;
                             restart-needed: root.restart-needed;
                             selected(v) => { root.audio-source-changed(v); }
+                        }
+                        VadSlidersCard {
+                            threshold <=> root.vad-threshold;
+                            hangover-ms <=> root.vad-hangover-ms;
+                            max-duration-ms <=> root.vad-max-duration-ms;
+                            changed(t, h, m) => { root.vad-changed(t, h, m); }
+                            reset-threshold => { root.vad-reset-threshold(); }
+                            reset-hangover => { root.vad-reset-hangover(); }
+                            reset-max-duration => { root.vad-reset-max-duration(); }
+                        }
+                        WhisperModelCard {
+                            entries: root.whisper-models;
+                            active: root.active-whisper-model;
+                            switch-in-flight: root.model-switch-in-flight;
+                            switch-status: root.model-switch-status;
+                            provider-is-local-whisper: !root.provider-is-cloud;
+                            switch-clicked(name) => { root.whisper-model-switch-clicked(name); }
                         }
                     }
 
@@ -1005,10 +1888,22 @@ component SettingsScreen inherits Rectangle {
                         }
                     }
 
-                    if root.current-tab == "dictionary": SettingsPlaceholder {
-                        tab-name: "Dictionary";
-                        icon: "📖";
-                        min-height: 320px;
+                    if root.current-tab == "dictionary": VerticalLayout {
+                        spacing: 0px;
+                        DictionaryCard {
+                            entries: root.dictionary-rows;
+                            entry-count: root.dictionary-entry-count;
+                            pending-phrase <=> root.dictionary-pending-phrase;
+                            pending-context <=> root.dictionary-pending-context;
+                            add-error: root.dictionary-add-error;
+                            show-restart-hint: root.dictionary-show-restart-hint;
+                            add(p, c) => { root.dictionary-add(p, c); }
+                            delete(i) => { root.dictionary-delete(i); }
+                            edit(i, p, c) => { root.dictionary-edit(i, p, c); }
+                            move-up(i) => { root.dictionary-move-up(i); }
+                            move-down(i) => { root.dictionary-move-down(i); }
+                            clear-error => { root.dictionary-clear-error(); }
+                        }
                     }
 
                     if root.current-tab == "notification": SettingsPlaceholder {
@@ -1414,6 +2309,60 @@ export component AppWindow inherits Window {
     callback provider-mode-changed(string);
     callback save-provider-key(string, string);
 
+    // ── Phase 7: Recording settings — VAD sliders + Whisper model picker ───────
+    // VAD slider values — seeded from recording.json at startup.
+    in-out property <float>  vad-threshold: 0.65;
+    in-out property <int>    vad-hangover-ms: 200;
+    in-out property <int>    vad-max-duration-ms: 8000;
+    // Emitted when any slider changes. Rust live-applies and debounce-persists.
+    callback vad-changed(float, int, int);
+    // Reset individual sliders to their default values.
+    callback vad-reset-threshold();
+    callback vad-reset-hangover();
+    callback vad-reset-max-duration();
+    // Whisper model picker.
+    in property <[WhisperModelEntry]> whisper-models: [];
+    in property <string>  active-whisper-model: "";
+    in property <bool>    model-switch-in-flight: false;
+    in property <string>  model-switch-status: "";
+    callback whisper-model-switch-clicked(string);
+
+    // ── Phase 8: Dictionary custom vocabulary ─────────────────────────────────
+    in property <[DictionaryEntryRow]> dictionary-rows: [];
+    in property <int>    dictionary-entry-count: 0;
+    in-out property <string> dictionary-pending-phrase: "";
+    in-out property <string> dictionary-pending-context: "common";
+    in property <string> dictionary-add-error: "";
+    in property <bool>   dictionary-show-restart-hint: false;
+    callback dictionary-add(string, string);
+    callback dictionary-delete(int);
+    callback dictionary-edit(int, string, string);
+    callback dictionary-move-up(int);
+    callback dictionary-move-down(int);
+    callback dictionary-clear-error();
+
+    // ─ Phase 9: Crash reporting (Sentry) ─────────────────────────────────────
+    // Initialised from consent file at startup; toggle persists immediately but
+    // Sentry only activates on next launch (init happens once at startup).
+    in-out property <bool> crash-reporting-enabled: false;
+    in property <bool>     crash-reporting-restart-hint: false;
+    callback crash-reporting-toggled(bool);
+
+    // ─ Phase 9: Wizard crash-report consent (step 6) ──────────────────────────
+    in-out property <bool> wizard-crash-reporting-consent: false;
+    callback wizard-crash-reporting-changed(bool);
+
+    // ─ Phase 10: Auto-summary (OpenAI gpt-4o-mini) ───────────────────────────
+    in property <bool> auto-summary-enabled: false;
+    in property <bool> auto-summary-has-key: false;
+    callback auto-summary-toggled(bool);
+    callback summary-regenerate-clicked(int);
+
+    // ─ Phase 9: Debug-only test trigger (never compiled in release) ───────────
+    // Calling this from a debug build fires tracing::error! + panic! to verify
+    // the full Sentry pipeline. In release builds, the callback is never wired.
+    callback dev-trigger-sentry-panic();
+
     // View routing — "main" (transcript + sidebar) vs "settings" (full-screen
     // Soniox-style tabbed settings). The gear icon in HeaderBar flips it.
     in-out property <string> current-view: "main";
@@ -1474,6 +2423,8 @@ export component AppWindow inherits Window {
                 api-key-test-result: api-key-test-result;
                 api-key-testing: api-key-testing;
                 model-ready: model-ready;
+                // Phase 9: wizard step 6 crash-report consent
+                crash-report-consent <=> wizard-crash-reporting-consent;
                 next => { root.wizard-next(); }
                 back => { root.wizard-back(); }
                 skip => { root.wizard-skip(); }
@@ -1482,6 +2433,7 @@ export component AppWindow inherits Window {
                 save-api-key(p, k) => { root.wizard-save-api-key(p, k); }
                 source-language-changed(v) => { root.wizard-source-changed(v); }
                 target-mode-changed(v) => { root.wizard-target-changed(v); }
+                wizard-crash-reporting-changed(v) => { root.wizard-crash-reporting-changed(v); }
             }
 
             // Step 4 (Model Download) content injected here — ModelDownloadCard lives
@@ -1533,6 +2485,45 @@ export component AppWindow inherits Window {
             current-target-mode: current-target-mode;
             source-language-changed(v) => { root.source-language-changed(v); }
             target-mode-changed(v) => { root.target-mode-changed(v); }
+
+            vad-threshold <=> vad-threshold;
+            vad-hangover-ms <=> vad-hangover-ms;
+            vad-max-duration-ms <=> vad-max-duration-ms;
+            vad-changed(t, h, m) => { root.vad-changed(t, h, m); }
+            vad-reset-threshold => { root.vad-reset-threshold(); }
+            vad-reset-hangover => { root.vad-reset-hangover(); }
+            vad-reset-max-duration => { root.vad-reset-max-duration(); }
+
+            whisper-models: whisper-models;
+            active-whisper-model: active-whisper-model;
+            model-switch-in-flight: model-switch-in-flight;
+            model-switch-status: model-switch-status;
+            whisper-model-switch-clicked(name) => { root.whisper-model-switch-clicked(name); }
+
+            // ── Phase 8: Dictionary
+            dictionary-rows: dictionary-rows;
+            dictionary-entry-count: dictionary-entry-count;
+            dictionary-pending-phrase <=> dictionary-pending-phrase;
+            dictionary-pending-context <=> dictionary-pending-context;
+            dictionary-add-error: dictionary-add-error;
+            dictionary-show-restart-hint: dictionary-show-restart-hint;
+            dictionary-add(p, c) => { root.dictionary-add(p, c); }
+            dictionary-delete(i) => { root.dictionary-delete(i); }
+            dictionary-edit(i, p, c) => { root.dictionary-edit(i, p, c); }
+            dictionary-move-up(i) => { root.dictionary-move-up(i); }
+            dictionary-move-down(i) => { root.dictionary-move-down(i); }
+            dictionary-clear-error => { root.dictionary-clear-error(); }
+
+            // ── Phase 9: Crash reporting
+            crash-report-enabled <=> crash-reporting-enabled;
+            crash-report-restart-hint: crash-reporting-restart-hint;
+            crash-reporting-toggled(v) => { root.crash-reporting-toggled(v); }
+
+            // ── Phase 10: Auto-summary
+            auto-summary-enabled: auto-summary-enabled;
+            auto-summary-has-key: auto-summary-has-key;
+            auto-summary-toggled(v) => { root.auto-summary-toggled(v); }
+            summary-regenerate-clicked(id) => { root.summary-regenerate-clicked(id); }
         }
 
         // ─── Main view: two-column body. Sidebar left, transcript-dominated main right.

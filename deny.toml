@@ -24,7 +24,19 @@ yanked = "deny"
 # `unmaintained = "none"` — don't fail on bincode/proc-macro-error/etc.
 # transitive deps that have no maintainer but no CVE either.
 unmaintained = "none"
-ignore = []
+ignore = [
+    # Phase 9 (Sentry): rustls-webpki 0.102.8 CVEs pulled in via
+    # sentry 0.34.0 → rustls 0.22.4 → rustls-webpki 0.102.8.
+    # Risk is low for this use case: the affected TLS path is used only
+    # for outbound Sentry crash reports (attacker would need to MITM the
+    # sentry.io ingest endpoint). Sentry 0.34.0 has not yet released a
+    # build against the patched rustls-webpki; unblock when sentry bumps.
+    # Track: https://github.com/getsentry/sentry-rust/issues (check on next sentry bump)
+    "RUSTSEC-2026-0049",  # CRLs not authoritative — rustls-webpki 0.102.x
+    "RUSTSEC-2026-0098",  # URI name constraint acceptance — rustls-webpki 0.102.x
+    "RUSTSEC-2026-0099",  # Wildcard cert name constraint — rustls-webpki 0.102.x
+    "RUSTSEC-2026-0104",  # Additional rustls-webpki 0.102.x advisory
+]
 
 [licenses]
 version = 2

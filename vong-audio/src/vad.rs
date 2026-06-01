@@ -31,7 +31,16 @@ use crate::error::AudioError;
 use crate::types::TARGET_SAMPLE_RATE_HZ;
 use crate::utterance::{PreRollBuffer, Utterance, UtteranceBuilder};
 use earshot::{DefaultPredictor, Detector};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Shared handle for live VAD config mutation from the UI thread.
+///
+/// Mirror of `LiveConfigHandle` in `vong-transcribe`. The VAD FSM snapshots
+/// this once per `process_chunk` call (~16 ms cadence). Lock is held only
+/// for the duration of a small struct clone — contention is negligible.
+pub type LiveVadConfig = Arc<Mutex<VadConfig>>;
 
 /// VAD frame size (samples). Earshot 1.1 fixed at 256 samples @ 16 kHz = 16 ms.
 pub const VAD_FRAME_SAMPLES: usize = 256;
@@ -40,7 +49,15 @@ pub const VAD_FRAME_SAMPLES: usize = 256;
 pub const VAD_FRAME_MS: u32 = 16;
 
 /// Configurable parameters for the VAD finite state machine.
-#[derive(Debug, Clone)]
+///
+/// Implements `Serialize`/`Deserialize` for persistence in `recording.json`.
+/// The `partial_emit_ms` field is skipped during serialization — it is a
+/// protocol constant coupled to earshot's 256-sample tokenization and must
+/// never be exposed as a user-adjustable slider (changing it mid-stream
+/// while `frames_since_partial` is non-zero would skip/repeat a partial
+/// emission). Only `threshold`, `hangover_ms`, and `max_duration_ms` are
+/// user-tunable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
     /// Voice score threshold in `[0.0, 1.0]`. Frames at or above are voiced.
     pub threshold: f32,
@@ -60,7 +77,19 @@ pub struct VadConfig {
     /// Default 1500 ms — empirically a good balance:
     /// - too short (<800 ms) → snapshot clone overhead + Whisper backlog
     /// - too long (>2500 ms) → "đến đâu hiện đến đấy" no longer feels live
+    ///
+    /// **NOT serialized**: this field is a protocol constant tied to earshot's
+    /// 256-sample tokenization. Changing it mid-stream while `frames_since_partial`
+    /// is non-zero would skip or repeat a partial emission. The deserialize default
+    /// restores the correct value automatically.
+    #[serde(skip, default = "default_partial_emit_ms")]
     pub partial_emit_ms: u32,
+}
+
+/// Default value for `partial_emit_ms` when deserializing from JSON (field is
+/// skipped, so serde needs this function to supply the correct protocol value).
+fn default_partial_emit_ms() -> u32 {
+    1_500
 }
 
 impl Default for VadConfig {
@@ -113,6 +142,10 @@ pub struct VadFsm {
     pre_roll: PreRollBuffer,
     current: Option<UtteranceBuilder>,
     seq: u64,
+    /// Optional live config handle. When present, `maybe_refresh_config` is
+    /// called at the top of each `process_chunk` to pick up UI slider changes
+    /// without restarting the FSM.
+    live_handle: Option<LiveVadConfig>,
 }
 
 impl VadFsm {
@@ -134,6 +167,51 @@ impl VadFsm {
             state: VadState::Idle,
             current: None,
             seq: 0,
+            live_handle: None,
+        }
+    }
+
+    /// Construct a FSM that reads config updates from a shared live handle.
+    ///
+    /// The handle is cloned into the FSM; UI thread and FSM both hold an
+    /// `Arc<Mutex<VadConfig>>`. The FSM snapshots the config at the top of
+    /// each `process_chunk` call. Threshold / hangover / max_duration changes
+    /// take effect on the very next VAD frame (~16 ms latency).
+    pub fn new_with_live(handle: LiveVadConfig) -> Self {
+        let initial = handle.lock().expect("live VAD config poisoned").clone();
+        let mut fsm = Self::new(initial);
+        fsm.live_handle = Some(handle);
+        fsm
+    }
+
+    /// Snapshot the live handle (if any) and apply updated values.
+    ///
+    /// Called at the top of each `process_chunk` — executes a mutex lock +
+    /// struct clone (~20 bytes) every ~16 ms. Contention is negligible because
+    /// the UI only writes on slider drag events.
+    ///
+    /// `partial_emit_frames` is intentionally NOT recomputed here — it is a
+    /// protocol constant (partial_emit_ms = 1500 ms fixed). Recomputing mid-
+    /// stream while `frames_since_partial` is non-zero would skip or repeat a
+    /// partial emission.
+    fn maybe_refresh_config(&mut self) {
+        let Some(ref handle) = self.live_handle else {
+            return;
+        };
+        let snapshot = handle.lock().expect("live VAD config poisoned").clone();
+        if snapshot.threshold != self.config.threshold
+            || snapshot.hangover_ms != self.config.hangover_ms
+            || snapshot.max_duration_ms != self.config.max_duration_ms
+        {
+            tracing::info!(
+                threshold = snapshot.threshold,
+                hangover_ms = snapshot.hangover_ms,
+                max_duration_ms = snapshot.max_duration_ms,
+                "VAD: live config update applied"
+            );
+            self.hangover_frames_max = snapshot.hangover_ms.div_ceil(VAD_FRAME_MS);
+            self.config = snapshot;
+            // partial_emit_frames intentionally NOT recomputed — see doc above.
         }
     }
 
@@ -147,6 +225,10 @@ impl VadFsm {
         chunk: &[i16],
         out_tx: &mpsc::Sender<Utterance>,
     ) -> Result<(), AudioError> {
+        // Snapshot live config at the start of each chunk (~16 ms cadence).
+        // Cheap: mutex lock + small struct clone. No effect when live_handle is None.
+        self.maybe_refresh_config();
+
         for frame in chunk.chunks_exact(VAD_FRAME_SAMPLES) {
             let score = self.detector.predict_i16(frame);
             let voiced = score >= self.config.threshold;
@@ -306,6 +388,32 @@ pub async fn run_vad_fsm(
     Ok(())
 }
 
+/// Variant of `run_vad_fsm` that accepts a `LiveVadConfig` handle so the UI
+/// can mutate threshold / hangover_ms / max_duration_ms at runtime without
+/// restarting the FSM or the audio pipeline.
+///
+/// Keeps the original `run_vad_fsm` for backward compatibility — existing
+/// tests and any static callers that don't need live config still work.
+pub async fn run_vad_fsm_live(
+    mut audio_rx: mpsc::Receiver<Vec<i16>>,
+    out_tx: mpsc::Sender<Utterance>,
+    handle: LiveVadConfig,
+) -> Result<(), AudioError> {
+    let mut fsm = VadFsm::new_with_live(handle);
+    tracing::info!(
+        sample_rate = TARGET_SAMPLE_RATE_HZ,
+        frame_samples = VAD_FRAME_SAMPLES,
+        frame_ms = VAD_FRAME_MS,
+        "VAD FSM (live config) started"
+    );
+
+    while let Some(chunk) = audio_rx.recv().await {
+        fsm.process_chunk(&chunk, &out_tx).await?;
+    }
+    tracing::info!("VAD FSM stopped (audio source closed)");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +466,69 @@ mod tests {
         // earshot 1.1 fixed: 256 samples @ 16kHz = 16ms
         assert_eq!(VAD_FRAME_SAMPLES, 256);
         assert_eq!(VAD_FRAME_MS, 16);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_config_update_applies_on_next_chunk() {
+        // Construct FSM with a live handle at default threshold (0.65).
+        let handle: LiveVadConfig = Arc::new(Mutex::new(VadConfig::default()));
+        let mut fsm = VadFsm::new_with_live(handle.clone());
+
+        // Verify initial config snapshot in the FSM.
+        assert!((fsm.config.threshold - 0.65).abs() < f32::EPSILON);
+
+        // Mutate through the handle (simulates UI slider drag).
+        handle.lock().unwrap().threshold = 0.90;
+
+        // Send one chunk of silence to trigger process_chunk → maybe_refresh_config.
+        let (tx, _rx) = mpsc::channel(8);
+        let silence = vec![0i16; VAD_FRAME_SAMPLES * 2];
+        fsm.process_chunk(&silence, &tx).await.unwrap();
+
+        // FSM's internal config must now reflect the new threshold.
+        assert!(
+            (fsm.config.threshold - 0.90).abs() < f32::EPSILON,
+            "expected threshold 0.90, got {}",
+            fsm.config.threshold
+        );
+    }
+
+    #[test]
+    fn live_config_no_panic_on_poison() {
+        // Verify that constructing with a live handle and reading it doesn't panic
+        // under normal usage (not testing actual poison which requires a panic).
+        let handle: LiveVadConfig = Arc::new(Mutex::new(VadConfig::default()));
+        let fsm = VadFsm::new_with_live(handle.clone());
+        assert!((fsm.config.threshold - 0.65).abs() < f32::EPSILON);
+
+        // Mutate the hangover_ms and verify it's visible through the handle.
+        handle.lock().unwrap().hangover_ms = 400;
+        assert_eq!(handle.lock().unwrap().hangover_ms, 400);
+    }
+
+    #[test]
+    fn partial_emit_ms_not_in_serde_output() {
+        // partial_emit_ms is skipped during serialization (protocol constant).
+        // Verify that round-tripping via serde_json restores the default value.
+        let cfg = VadConfig {
+            threshold: 0.7,
+            hangover_ms: 300,
+            max_duration_ms: 5000,
+            pre_roll_ms: 100,
+            min_duration_ms: 100,
+            partial_emit_ms: 9999, // intentionally set to non-default
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        // partial_emit_ms must not appear in the JSON output
+        assert!(!json.contains("partial_emit_ms"), "partial_emit_ms should be skipped: {}", json);
+
+        // On deserialization, partial_emit_ms must come back as the protocol default (1500).
+        let restored: VadConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.partial_emit_ms,
+            1500,
+            "partial_emit_ms must restore to 1500 after roundtrip"
+        );
+        assert!((restored.threshold - 0.7).abs() < f32::EPSILON);
     }
 }

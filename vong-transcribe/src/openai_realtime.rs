@@ -49,6 +49,13 @@ pub struct OpenAIRealtimeProvider {
     api_key: ApiKey,
     ws_url: String,
     model: String,
+    /// Pre-built `session.update.instructions` string for vocabulary injection.
+    ///
+    /// Built via `build_openai_instructions()` and injected into the
+    /// `transcription_session.update` message at session open. Empty string = no-op.
+    ///
+    /// Privacy: this string contains user vocabulary — never log it.
+    dictionary_instructions: String,
 }
 
 impl OpenAIRealtimeProvider {
@@ -58,6 +65,7 @@ impl OpenAIRealtimeProvider {
             api_key,
             ws_url: DEFAULT_WS_URL.into(),
             model: DEFAULT_MODEL.into(),
+            dictionary_instructions: String::new(),
         }
     }
 
@@ -70,6 +78,18 @@ impl OpenAIRealtimeProvider {
     /// Override the transcription model id.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Inject a pre-built vocabulary instructions string into the session config.
+    ///
+    /// Use `build_openai_instructions(&entries)` to construct the string from a
+    /// `Vec<DictEntry>`. Applied once at WebSocket session open — changing the
+    /// dictionary after session start requires a restart.
+    ///
+    /// Privacy: the instructions string contains user vocabulary — never log it.
+    pub fn with_dictionary_instructions(mut self, instructions: String) -> Self {
+        self.dictionary_instructions = instructions;
         self
     }
 }
@@ -121,6 +141,17 @@ impl StreamingTranscriber for OpenAIRealtimeProvider {
         // ── Configure the transcription session ──
         // turn_detection=null because our own VAD already packages utterances;
         // server-side VAD would double-segment and confuse the seq mapping.
+        //
+        // `instructions` is injected from the user's dictionary vocabulary.
+        // An empty string is a safe no-op for the OpenAI Realtime API.
+        // Privacy: log only whether instructions are non-empty, never the content.
+        let instructions = self.dictionary_instructions.clone();
+        if !instructions.is_empty() {
+            tracing::debug!(
+                instructions_len = instructions.len(),
+                "OpenAIRealtimeProvider: dictionary instructions injected"
+            );
+        }
         let session_config = json!({
             "type": "transcription_session.update",
             "session": {
@@ -130,6 +161,7 @@ impl StreamingTranscriber for OpenAIRealtimeProvider {
                     "language": opts.language_hint.clone(),
                 },
                 "turn_detection": serde_json::Value::Null,
+                "instructions": instructions,
             }
         });
         write

@@ -27,6 +27,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"        # Production crash log to file (GUI app stderr invisible)
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Phase 3 wizard — API key test (WS ping to Soniox / OpenAI).
@@ -41,6 +42,19 @@ vong-storage = { workspace = true }
 rtrb = "0.3"      # Ring buffer (we hold consumer side; resampler wiring comes Phase 1 proper)
 cpal = "0.17"     # For DeviceTrait::name() display in UI
 directories = "6" # Audio source preference config path (%APPDATA%\Vong\Vong AI Recorder\config\)
+
+# Phase 9: Crash reporting (Sentry) — opt-in, privacy-scrubbed.
+# default-features = false to exclude debug-images (~120 KB) + curl transport.
+# rustls TLS avoids linking schannel/openssl natively.
+sentry = { version = "0.34", default-features = false, features = [
+    "backtrace",   # symbol resolution for stack frames
+    "contexts",    # device + OS context auto-collection
+    "panic",       # std::panic hook integration (sentry-panic sub-crate)
+    "transport",   # required by all HTTP transports
+    "reqwest",     # use reqwest HTTP transport (already vendored by vong-transcribe)
+    "rustls",      # rustls TLS — avoids linking schannel/openssl
+] }
+sentry-tracing = "0.34"  # bridges tracing macros → Sentry breadcrumbs / events
 
 # Phase 5 (partial) — system tray icon + global hotkey. Cross-platform Win + Mac + Linux.
 tray-icon = "0.24"      # System tray + menu
@@ -58,6 +72,9 @@ upgrade-guid = "FFC0DF45-51D5-45F8-A336-A5113CAFC06D"
 path-guid = "0F4C24A4-878D-477B-A38D-DBFAE84D5AB8"
 license = false
 eula = false
+
+[dev-dependencies]
+tempfile = "3"        # Temporary directories for dictionary_test.rs file I/O tests
 
 [build-dependencies]
 slint-build = "1.7"

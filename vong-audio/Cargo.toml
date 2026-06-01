@@ -15,6 +15,7 @@ path = "src/lib.rs"
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 
 # Phase 1 — Mic capture pipeline
 cpal = "0.17"                          # Cross-platform audio I/O (latest as of 2026-05)
@@ -32,3 +33,4 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 hound = "3.5"                          # WAV file I/O for integration tests
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+serde_json = { workspace = true }      # for vad.rs Serialize/Deserialize roundtrip tests

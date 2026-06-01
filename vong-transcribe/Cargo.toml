@@ -11,9 +11,12 @@ description = "Vọng transcription engines (Whisper local, Soniox WebSocket, Op
 name = "vong_transcribe"
 path = "src/lib.rs"
 
-# Opt-in features. Default keeps build CPU-only (no extra system deps).
-# `vulkan` enables whisper.cpp Vulkan backend — requires Vulkan SDK
-# at build time (VULKAN_SDK env var) and a Vulkan-capable GPU at runtime.
+# Opt-in features per-platform:
+#   Windows/Linux default = CPU-only. `vulkan` flag enables whisper.cpp
+#     Vulkan backend — requires Vulkan SDK at build time (VULKAN_SDK env var)
+#     and a Vulkan-capable GPU at runtime.
+#   macOS default = `metal` (auto-enabled via target-specific dep below) —
+#     uses whisper.cpp Metal backend, no SDK install needed, zero friction.
 [features]
 default = []
 vulkan = ["whisper-rs/vulkan"]
@@ -34,11 +37,6 @@ secrecy = "0.10"
 zeroize = "1"             # Zeroizing<String> wrapper for JSON containing api_key
 base64 = "0.22"           # OpenAI Realtime input_audio_buffer.append uses base64 PCM
 
-# Phase 4 local — whisper.cpp via Rust bindings. Compiled from C source on first
-# build (needs cmake + MSVC on Windows). Default = CPU-only. Opt-in GPU via
-# the `vulkan` feature on this crate (cascades to whisper-rs/vulkan).
-# Pinned 0.16 — earlier 0.14 had bindings/struct-size mismatch on MSVC.
-whisper-rs = { version = "0.16", default-features = false }
 directories = "6"         # Cross-platform AppData / model storage discovery
 
 # Phase 2 — In-app Whisper model downloader
@@ -47,6 +45,22 @@ sha2 = "0.10"
 
 # Internal: shared types (Utterance struct from audio crate)
 vong-audio = { workspace = true }
+
+# Phase 4 local — whisper.cpp via Rust bindings. Compiled from C source on first
+# build (needs cmake + MSVC on Windows, cmake on macOS). Pinned 0.16 — earlier
+# 0.14 had bindings/struct-size mismatch on MSVC.
+#
+# Backend selection is target-specific so each OS uses its native GPU stack
+# without forcing the user to pick a flag. Cargo unifies features across
+# target blocks for the same crate, so `--features vulkan` still works on
+# Windows/Linux even with this split.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+whisper-rs = { version = "0.16", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS auto-enables `metal` (whisper.cpp Metal GPU backend). FFI-links to
+# Metal.framework which ships with macOS — no extra SDK install required.
+whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
 tempfile = "3"

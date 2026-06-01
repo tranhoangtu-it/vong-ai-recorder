@@ -63,6 +63,12 @@ for ~20-30 Vietnamese testers via unsigned MSI installer + landing page.
 - **`vong-transcribe::traits`**: `ProviderMode` + `TargetMode` now use
   `#[derive(Default)]` with `#[default]` markers (fixes `derivable_impls`
   clippy warning that was blocking CI gate).
+- **`vong-transcribe` whisper-rs declaration**: split into target-specific
+  Cargo dependency blocks. macOS builds now auto-enable the `metal` feature
+  (whisper.cpp Metal GPU backend) — no `--features` flag needed, no SDK
+  install beyond `brew install cmake`. Windows/Linux unchanged: CPU by
+  default, `--features vulkan` still opt-in. CoreML (Apple Neural Engine)
+  deliberately deferred.
 
 ### Fixed
 

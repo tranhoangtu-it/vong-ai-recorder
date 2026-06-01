@@ -12,7 +12,7 @@ Desktop transcription app cho Windows 10/11 với real-time Vietnamese-first tra
 - 🎙 **Capture** — mic hoặc speakers (WASAPI loopback) qua cpal + MMCSS RT priority
 - 🔁 **Hot-swap source** — đổi mic/speakers trong khi đang ghi, không cần restart
 - 🎯 **VAD** — earshot phát hiện giọng nói, đóng gói utterance tự động
-- 🧠 **Whisper Base local** — CPU (~12-20s/utterance) hoặc Vulkan GPU (~0.15-1.2s, 35-100× faster)
+- 🧠 **Whisper Base local** — CPU (~12-20s/utterance) hoặc Vulkan GPU trên Windows (~0.15-1.2s, 35-100× faster) hoặc Metal GPU trên macOS (auto, không cần SDK)
 - 📝 **SQLite + FTS5** — sessions + segments persist, NFC-normalize, tone-insensitive search ("viet" khớp "Việt")
 - 🔥 **GPU warmup** — pre-pay shader-pipeline init ở startup, user không thấy lag mid-utterance
 - 🪟 **System tray + global hotkey** — Ctrl+Shift+R toggle window visibility
@@ -40,7 +40,9 @@ cargo build --release                          # Default: CPU-only Whisper (~8 M
 # macOS/Linux: ./target/release/vong  (scaffolding only — features deferred)
 ```
 
-#### GPU build (opt-in, NVIDIA / AMD / Intel via Vulkan)
+#### GPU build options
+
+##### Windows — Vulkan opt-in (NVIDIA / AMD / Intel)
 
 ```powershell
 # One-time: install Vulkan SDK (~750 MB, includes headers + libs)
@@ -52,6 +54,21 @@ $env:CMAKE_GENERATOR = "Ninja"
 
 cargo build --release --features vulkan        # ~60 MB binary (SPIR-V shaders embedded)
 ```
+
+##### macOS — Metal auto (Apple Silicon M-series)
+
+```bash
+# One-time: just cmake. Metal SDK ships with macOS — no extra install.
+brew install cmake
+
+# Metal backend is auto-enabled via target-specific dependency in
+# vong-transcribe/Cargo.toml. No --features flag needed.
+cargo build --release --bin vong
+```
+
+CoreML (Apple Neural Engine) is deliberately NOT auto-enabled — adds
+~30s first-run ANE compile + separate model file. Deferred to a future
+sprint.
 
 Verified end-to-end on Windows 11:
 - Phase 0: Slint window "Vọng" opens, panic-safe logging initialized
@@ -110,7 +127,7 @@ vong-audio/    Audio capture + resampler + VAD (Phase 1-3)
                cpal WASAPI (input + loopback) → rtrb SPSC ring → rubato sinc resampler
                → earshot VAD FSM → Utterance pack. 16 kHz mono i16 target.
 vong-transcribe/ Transcription providers (3 backends behind one trait)
-               · WhisperLocalProvider (whisper.cpp via whisper-rs, CPU/Vulkan)
+               · WhisperLocalProvider (whisper.cpp via whisper-rs, CPU / Vulkan / macOS Metal)
                · SonioxProvider (WebSocket BYOK — word-level partials)
                · OpenAIRealtimeProvider (WebSocket BYOK — gpt-4o-mini-transcribe)
 vong-storage/  SQLite + FTS5 (`unicode61 remove_diacritics 2`) — sessions + segments,
@@ -126,7 +143,7 @@ vong-ui/       Reusable Slint components (Phase 5-future — currently inlined i
 | 1 | ✅ Wired | Mic capture (cpal WASAPI + MMCSS RT + U8/I16/U16/F32 formats) |
 | 2-W | ✅ Wired | Windows loopback (output devices via WASAPI loopback flag) |
 | 3 | ✅ Wired | earshot VAD FSM + utterance packaging |
-| 4 | ✅ Wired | Whisper Base local (CPU + Vulkan GPU opt-in) + warmup |
+| 4 | ✅ Wired | Whisper Base local (CPU + Vulkan opt-in + macOS Metal auto) + warmup |
 | 5 | ✅ Wired | Tray + global hotkey + Floating Pill |
 | 6 | ✅ Wired | SQLite FTS5 + History UI + Search UI + Markdown export |
 | 7 | ✅ Minimal | First-launch onboarding banner + dismiss persist |

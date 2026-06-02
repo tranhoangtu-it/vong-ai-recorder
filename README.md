@@ -26,6 +26,10 @@ Desktop transcription app cho Windows 10/11 với real-time Vietnamese-first tra
 - 📜 **Session detail view** — click vào history row → mở SessionDetail với card tóm tắt + Regenerate / Copy + danh sách transcript segments
 - 🔔 **Toast + Dialog** — UI feedback nhất quán (info/warn/error), modal confirm trước các thao tác phá hoại (đổi mô hình, đổi provider)
 - 🔄 **Provider hot-swap** — đổi engine STT trong Settings → System không cần restart, dictionary + ngôn ngữ giữ nguyên
+- 👥 **Diarization (Soniox)** — speaker labels '🎤 Người 1 / 2 / N' trong transcript khi dùng Soniox engine (Whisper + OpenAI deferred)
+- ⌨ **Voice Typing** — Ctrl+Shift+V anywhere → nói → văn bản tự gõ vào app đang focus qua `enigo` SendInput (Windows; macOS Sprint 5)
+- 🆙 **Auto-update checker** — kiểm tra phiên bản mới từ R2 sau khi launch 30s, toast thông báo có bản mới, không tự cài (mở browser tới landing)
+- 🌐 **i18n EN/VI toggle** — Settings → System đổi ngôn ngữ giao diện tức thì, không restart (~62 chuỗi user-facing đã translate, wizard + card bodies Sprint 5)
 - 📜 **Log rotation** — daily rolling file ở `%APPDATA%\Vong\Vong AI Recorder\data\logs\`
 
 ## Quick Start (Dev)
@@ -164,6 +168,10 @@ vong-ui/       Reusable Slint components (Phase 5-future — currently inlined i
 | 14 | ✅ Wired | HistoryCard VecModel + SessionDetail view + Summary preview wiring |
 | 15 | ✅ Wired | Toast + Dialog Slint infrastructure + model-switch confirm |
 | 16 | ✅ Wired | Provider hot-swap (no restart, LiveSttConfig preserved) |
+| 17 | ✅ Wired | Diarization (Soniox speaker labels in transcript + DB) |
+| 18 | ✅ Wired | Auto-update checker (R2 latest/version.txt + semver compare + toast) |
+| 19 | ✅ Wired | Voice Typing (Ctrl+Shift+V global hotkey + enigo text injection, Windows-only) |
+| 20 | ✅ Wired | i18n EN/VI toggle (62 strings) + last-viewed session persist + model picker re-populate after hot-swap |
 | 2-macOS | ⏸ Paused | screencapturekit + clock drift — deferred until Windows ships |
 
 **Wiring status**: All 7 wired phases functional via `vong-app/src/main.rs` pipeline.

@@ -23,6 +23,81 @@ struct TranscriptLine {
     original-text: string,     // auto-detected text ("Bản gốc")
     duration-ms: int,          // for confidence dimming if needed
     translation-done: bool,    // true once pass B has emitted Translation
+    speaker: string,           // diarization label e.g. "1" from Soniox; "" = no diarization
+}
+
+// ── Phase 20: Locale strings struct ──────────────────────────────────────────
+//
+// Populated by Rust from i18n.rs on startup and on locale toggle.
+// All fields default to Vietnamese so the UI is never blank even if Rust
+// pushes the struct late. Sprint 5 will cover remaining untranslated strings
+// (wizard, deeper error messages from external APIs, VAD slider labels).
+export struct LocaleStrings {
+    // Main view
+    tap-to-record: string,
+    recording-active: string,
+    transcript-original: string,
+    transcript-translated: string,
+    waiting-speech: string,
+    col-hint-original: string,
+    col-hint-translated: string,
+    silence-placeholder: string,
+    no-translation: string,
+    translating: string,
+    // History / sidebar
+    history-title: string,
+    history-empty: string,
+    search-placeholder: string,
+    export-btn: string,
+    // Settings tab names
+    tab-system: string,
+    tab-voice-typing: string,
+    tab-recording: string,
+    tab-language: string,
+    tab-dictionary: string,
+    tab-notification: string,
+    // Settings section titles
+    settings-title: string,
+    section-system: string,
+    section-system-sub: string,
+    section-recording: string,
+    section-recording-sub: string,
+    section-language: string,
+    section-language-sub: string,
+    section-voice-typing: string,
+    section-voice-typing-sub: string,
+    // Settings card titles
+    stt-engine: string,
+    audio-source: string,
+    crash-reporting: string,
+    auto-update: string,
+    auto-summary: string,
+    diarization: string,
+    whisper-model: string,
+    dictionary-title: string,
+    language-card: string,
+    // Interface language card
+    interface-language: string,
+    locale-vi: string,
+    locale-en: string,
+    // SessionDetail
+    session-summary: string,
+    session-content: string,
+    session-no-segments: string,
+    summary-idle: string,
+    summary-computing: string,
+    summary-needs-key: string,
+    btn-regenerate: string,
+    btn-copy: string,
+    placeholder-coming: string,
+    // Common
+    restart-to-apply: string,
+    toggle-on: string,
+    toggle-off: string,
+    btn-save: string,
+    btn-check-now: string,
+    btn-add: string,
+    api-key-label: string,
 }
 
 // ---- Design tokens (mirrored from docs/design.md §1.2) ----
@@ -90,7 +165,7 @@ component HeaderBar inherits Rectangle {
                 vertical-alignment: center;
             }
             Text {
-                text: in-settings ? "Cài đặt" : "Vọng AI Recorder";
+                text: in-settings ? "Settings / Cài đặt" : "Vọng AI Recorder";
                 font-size: Tokens.font-body;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -261,6 +336,8 @@ component AudioSourceCard inherits Rectangle {
 // Exports the most-recent session's segments to `~/Documents/Vong/`.
 component ExportCard inherits Rectangle {
     in property <string> status;
+    // Phase 20: translated button label.
+    in property <string> btn-text: "📥  Xuất phiên mới nhất → Markdown";
     callback export-clicked();
 
     background: Tokens.surface;
@@ -282,7 +359,7 @@ component ExportCard inherits Rectangle {
                 border-radius: 4px;
                 animate background { duration: 100ms; }
                 Text {
-                    text: "📥  Xuất phiên mới nhất → Markdown";
+                    text: root.btn-text;
                     font-size: Tokens.font-caption;
                     font-weight: 600;
                     color: white;
@@ -406,6 +483,10 @@ component HistoryCard inherits Rectangle {
     in property <[HistoryRowData]> history-model: [];
     in property <string> search-text: "";   // FTS5 results when user is searching
     in property <bool> is-searching: false; // true while search query is non-empty
+    // Phase 20: translated display strings (default = Vietnamese).
+    in property <string> title-text: "Tìm + Lịch sử";
+    in property <string> empty-text: "Chưa có phiên nào được lưu.";
+    in property <string> search-placeholder-text: "Tìm trong tất cả phiên ghi…";
     callback search-changed(string);
     callback row-clicked(int);             // emits session_id
 
@@ -429,7 +510,7 @@ component HistoryCard inherits Rectangle {
                 y: (parent.height - self.height) / 2;
             }
             Text {
-                text: "Tìm + Lịch sử";
+                text: root.title-text;
                 font-size: Tokens.font-secondary;
                 font-weight: 600;
                 color: Tokens.text-primary;
@@ -438,7 +519,7 @@ component HistoryCard inherits Rectangle {
         }
 
         LineEdit {
-            placeholder-text: "Tìm trong tất cả phiên ghi…";
+            placeholder-text: root.search-placeholder-text;
             edited(t) => {
                 root.search-changed(t);
             }
@@ -458,7 +539,7 @@ component HistoryCard inherits Rectangle {
             alignment: start;
 
             if history-model.length == 0: Text {
-                text: "Chưa có phiên nào được lưu.";
+                text: root.empty-text;
                 font-size: Tokens.font-caption;
                 color: Tokens.text-hint;
                 horizontal-alignment: center;
@@ -531,6 +612,13 @@ component SessionDetailCard inherits Rectangle {
     // "idle" | "computing" | "done" | "needs-api-key" | "error"
     in property <string> summary-state: "idle";
     in property <string> error-message: "";
+    // Phase 20: translated strings.
+    in property <string> lbl-summary: "Tóm tắt phiên";
+    in property <string> lbl-regenerate: "↺ Tạo lại";
+    in property <string> lbl-copy: "📋 Sao chép";
+    in property <string> lbl-computing: "Đang tạo tóm tắt…";
+    in property <string> lbl-needs-key: "Cần API key OpenAI — cấu hình trong Cài đặt → System.";
+    in property <string> lbl-idle: "Chưa có tóm tắt. Bật tự động tóm tắt hoặc nhấn Tạo lại.";
     callback regenerate-clicked();
     callback copy-clicked();
 
@@ -556,7 +644,7 @@ component SessionDetailCard inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                 }
                 Text {
-                    text: "Tóm tắt phiên";
+                    text: root.lbl-summary;
                     font-size: Tokens.font-secondary;
                     font-weight: 600;
                     color: Tokens.text-primary;
@@ -582,7 +670,7 @@ component SessionDetailCard inherits Rectangle {
                         border-color: Tokens.accent;
                         animate background { duration: 80ms; }
                         Text {
-                            text: "↺ Tạo lại";
+                            text: root.lbl-regenerate;
                             font-size: Tokens.font-caption;
                             font-weight: 600;
                             color: regen-btn.enabled ? Tokens.text-primary : Tokens.text-hint;
@@ -605,7 +693,7 @@ component SessionDetailCard inherits Rectangle {
                         border-color: copy-btn.enabled ? Tokens.accent : Tokens.border;
                         animate background { duration: 80ms; }
                         Text {
-                            text: "📋 Sao chép";
+                            text: root.lbl-copy;
                             font-size: Tokens.font-caption;
                             font-weight: 600;
                             color: copy-btn.enabled ? Tokens.text-primary : Tokens.text-hint;
@@ -623,7 +711,7 @@ component SessionDetailCard inherits Rectangle {
             alignment: start;
             Text { text: "⏳"; font-size: 16px; color: Tokens.text-hint; vertical-alignment: center; }
             Text {
-                text: "Đang tạo tóm tắt…";
+                text: root.lbl-computing;
                 font-size: Tokens.font-secondary;
                 color: Tokens.text-secondary;
                 vertical-alignment: center;
@@ -631,7 +719,7 @@ component SessionDetailCard inherits Rectangle {
         }
 
         if summary-state == "needs-api-key": Text {
-            text: "Cần API key OpenAI — cấu hình trong Cài đặt → System.";
+            text: root.lbl-needs-key;
             font-size: Tokens.font-secondary;
             color: Tokens.danger;
             wrap: word-wrap;
@@ -645,7 +733,7 @@ component SessionDetailCard inherits Rectangle {
         }
 
         if summary-state == "idle": Text {
-            text: "Chưa có tóm tắt. Bật tự động tóm tắt hoặc nhấn Tạo lại.";
+            text: root.lbl-idle;
             font-size: Tokens.font-secondary;
             color: Tokens.text-hint;
             wrap: word-wrap;
@@ -673,6 +761,15 @@ component SessionDetailView inherits Rectangle {
     in property <string> detail-error-message: "";
     // Segments list
     in property <[DetailSegmentRow]> detail-segments: [];
+    // Phase 20: translated labels forwarded to sub-cards.
+    in property <string> lbl-session-summary: "Tóm tắt phiên";
+    in property <string> lbl-regenerate: "↺ Tạo lại";
+    in property <string> lbl-copy: "📋 Sao chép";
+    in property <string> lbl-computing: "Đang tạo tóm tắt…";
+    in property <string> lbl-needs-key: "Cần API key OpenAI — cấu hình trong Cài đặt → System.";
+    in property <string> lbl-idle: "Chưa có tóm tắt. Bật tự động tóm tắt hoặc nhấn Tạo lại.";
+    in property <string> lbl-content: "Nội dung phiên";
+    in property <string> lbl-no-segments: "Chưa có đoạn nào được ghi.";
     callback back-clicked();
     callback detail-regenerate-clicked(int);
     callback detail-copy-clicked(int);
@@ -749,6 +846,12 @@ component SessionDetailView inherits Rectangle {
                     summary-text: root.detail-summary-text;
                     summary-state: root.detail-summary-state;
                     error-message: root.detail-error-message;
+                    lbl-summary: root.lbl-session-summary;
+                    lbl-regenerate: root.lbl-regenerate;
+                    lbl-copy: root.lbl-copy;
+                    lbl-computing: root.lbl-computing;
+                    lbl-needs-key: root.lbl-needs-key;
+                    lbl-idle: root.lbl-idle;
                     regenerate-clicked => { root.detail-regenerate-clicked(root.detail-session-id); }
                     copy-clicked => { root.detail-copy-clicked(root.detail-session-id); }
                 }
@@ -763,7 +866,7 @@ component SessionDetailView inherits Rectangle {
                         y: (parent.height - self.height) / 2;
                     }
                     Text {
-                        text: "Nội dung phiên  ·  " + detail-segments.length + " đoạn";
+                        text: root.lbl-content + "  ·  " + detail-segments.length + " đoạn";
                         font-size: Tokens.font-secondary;
                         font-weight: 600;
                         color: Tokens.text-primary;
@@ -772,7 +875,7 @@ component SessionDetailView inherits Rectangle {
                 }
 
                 if detail-segments.length == 0: Text {
-                    text: "Chưa có đoạn nào được ghi.";
+                    text: root.lbl-no-segments;
                     font-size: Tokens.font-secondary;
                     color: Tokens.text-hint;
                     horizontal-alignment: center;
@@ -924,6 +1027,88 @@ component CrashReportCard inherits Rectangle {
             font-size: Tokens.font-caption;
             color: Tokens.text-hint;
             wrap: word-wrap;
+        }
+    }
+}
+
+// ── Phase 18: Diarization toggle card ────────────────────────────────────────
+//
+// Enabled only for Soniox — Whisper local + OpenAI Realtime do not support
+// server-side diarization yet. When on, Soniox annotates each token with a
+// speaker label; the transcript columns show "🎤 Người 1 / Người 2 …" chips.
+component DiarizationCard inherits Rectangle {
+    in-out property <bool> diarization-enabled: false;
+    callback toggled(bool);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Nhận diện người nói (chỉ Soniox)";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: "Soniox sẽ gắn nhãn người nói (SP1, SP2, ...). Whisper local + OpenAI Realtime chưa hỗ trợ.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-secondary;
+            wrap: word-wrap;
+        }
+
+        toggle-row := TouchArea {
+            height: 36px;
+            clicked => {
+                root.diarization-enabled = !root.diarization-enabled;
+                root.toggled(root.diarization-enabled);
+            }
+            HorizontalBox {
+                spacing: 12px;
+                alignment: space-between;
+
+                Text {
+                    text: root.diarization-enabled ? "Đang bật" : "Đang tắt";
+                    font-size: Tokens.font-secondary;
+                    color: root.diarization-enabled ? Tokens.success : Tokens.text-hint;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 44px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: root.diarization-enabled ? Tokens.accent : #404040;
+                    animate background { duration: 150ms; }
+                    y: (parent.height - self.height) / 2;
+
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: white;
+                        x: root.diarization-enabled ? parent.width - self.width - 3px : 3px;
+                        y: (parent.height - self.height) / 2;
+                        animate x { duration: 150ms; easing: ease-in-out; }
+                    }
+                }
+            }
         }
     }
 }
@@ -1101,6 +1286,12 @@ component TranscriptColumn inherits Rectangle {
     // button sitting between the two columns. Outer corners stay at 8 px.
     in property <length> radius-bl: 8px;
     in property <length> radius-br: 8px;
+    // Phase 20: translated placeholder strings (default = Vietnamese).
+    in property <string> waiting-text: "Đang chờ giọng nói…";
+    in property <string> col-hint-text: "";
+    in property <string> silence-text: "(im lặng)";
+    in property <string> no-translation-text: "(không có)";
+    in property <string> translating-text: "⏳  đang dịch…";
 
     background: Tokens.surface;
     border-radius: 8px;
@@ -1152,16 +1343,14 @@ component TranscriptColumn inherits Rectangle {
                         color: Tokens.text-hint;
                     }
                     Text {
-                        text: "Đang chờ giọng nói…";
+                        text: root.waiting-text;
                         font-size: Tokens.font-h2;
                         font-weight: 600;
                         color: Tokens.text-secondary;
                         horizontal-alignment: center;
                     }
                     Text {
-                        text: use-original
-                            ? "Whisper auto-detect sẽ điền cột này ngay\nkhi mỗi utterance được nhận diện."
-                            : "Whisper với gợi ý tiếng Việt điền cột này\nsau khi pass đầu hoàn tất.";
+                        text: root.col-hint-text;
                         font-size: Tokens.font-caption;
                         color: Tokens.text-hint;
                         horizontal-alignment: center;
@@ -1198,6 +1387,25 @@ component TranscriptColumn inherits Rectangle {
                         width: 28px;
                     }
 
+                    // Speaker badge — shown only in the "Bản gốc" (original) column
+                    // when diarization is active and the STT provider returned a tag.
+                    // Format: "🎤 Người 1" / "🎤 Người 2" etc.
+                    if use-original && line.speaker != "": Rectangle {
+                        background: #1e1333;
+                        border-radius: 4px;
+                        height: 18px;
+                        width: 68px;
+                        y: 2px;
+                        Text {
+                            text: "🎤 Người " + line.speaker;
+                            font-size: 9px;
+                            color: Tokens.accent;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+
                     // Main text — wraps to fill remaining width.
                     //
                     // Translation column placeholder logic:
@@ -1210,10 +1418,10 @@ component TranscriptColumn inherits Rectangle {
                     //   - otherwise          → original-text
                     Text {
                         text: use-original
-                            ? (line.original-text == "" ? "(im lặng)" : line.original-text)
+                            ? (line.original-text == "" ? root.silence-text : line.original-text)
                             : (line.translation-done
-                                ? (line.text == "" ? "(không có)" : line.text)
-                                : "⏳  đang dịch…");
+                                ? (line.text == "" ? root.no-translation-text : line.text)
+                                : root.translating-text);
                         font-size: Tokens.font-secondary;
                         color: use-original
                             ? (line.original-text == "" ? Tokens.text-hint : Tokens.text-primary)
@@ -1292,7 +1500,7 @@ component SettingsPlaceholder inherits Rectangle {
             horizontal-alignment: center;
         }
         Text {
-            text: "Tính năng sẽ có ở bản kế tiếp.";
+            text: "Tính năng sẽ có ở bản kế tiếp. / Feature coming in a future release.";
             font-size: Tokens.font-secondary;
             color: Tokens.text-hint;
             horizontal-alignment: center;
@@ -1606,6 +1814,140 @@ component WhisperModelCard inherits Rectangle {
             text: root.switch-status;
             font-size: Tokens.font-caption;
             color: root.switch-status == "Đang tải mô hình…" ? Tokens.text-secondary : Tokens.danger;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// ── Phase 19: Auto-update card for Settings → System tab ─────────────────
+//
+// Placed BELOW Phase 9's CrashReportCard and ABOVE Phase 10's AutoSummaryCard.
+
+/// Card: auto-update toggle + "Check now" button + version display.
+component AutoUpdateCard inherits Rectangle {
+    // Whether background update checks are enabled (default ON, opt-out model).
+    in-out property <bool> auto-update-enabled: true;
+    // Version strings populated after a check; empty string = not yet checked.
+    in property <string> current-version: "";
+    in property <string> latest-version: "";
+    // Fired when user flips the toggle — Rust writes auto_update.txt.
+    callback auto-update-toggled(bool);
+    // Fired when user clicks "Kiểm tra ngay" — Rust calls check_for_update().
+    callback check-now();
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        // Card title row
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: "Cập nhật tự động";
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        // Toggle row
+        toggle-row := TouchArea {
+            height: 36px;
+            clicked => {
+                root.auto-update-enabled = !root.auto-update-enabled;
+                root.auto-update-toggled(root.auto-update-enabled);
+            }
+            HorizontalBox {
+                spacing: 12px;
+                alignment: space-between;
+
+                Text {
+                    text: "Tự động kiểm tra cập nhật";
+                    font-size: Tokens.font-secondary;
+                    color: Tokens.text-primary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                // Visual toggle pill
+                Rectangle {
+                    width: 44px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: root.auto-update-enabled ? Tokens.accent : #404040;
+                    animate background { duration: 150ms; }
+                    y: (parent.height - self.height) / 2;
+
+                    Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        background: white;
+                        x: root.auto-update-enabled ? parent.width - self.width - 3px : 3px;
+                        y: (parent.height - self.height) / 2;
+                        animate x { duration: 150ms; easing: ease-in-out; }
+                    }
+                }
+            }
+        }
+
+        // Version info row (shown when version strings are populated)
+        if root.current-version != "": HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: "Phiên bản hiện tại: " + root.current-version;
+                font-size: Tokens.font-caption;
+                color: Tokens.text-secondary;
+                vertical-alignment: center;
+            }
+            if root.latest-version != "": Text {
+                text: "·  Mới nhất: " + root.latest-version;
+                font-size: Tokens.font-caption;
+                color: root.latest-version != root.current-version
+                    ? Tokens.success : Tokens.text-hint;
+                vertical-alignment: center;
+            }
+        }
+
+        // "Check now" button
+        check-area := TouchArea {
+            height: 32px;
+            clicked => { root.check-now(); }
+
+            Rectangle {
+                background: check-area.has-hover ? Tokens.surface-hover : transparent;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Tokens.border;
+
+                Text {
+                    text: "Kiểm tra ngay";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.accent;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Privacy note
+        Text {
+            text: "Chỉ gửi yêu cầu GET đến dl.vong.app — không có ID thiết bị hay dữ liệu cá nhân.";
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
             wrap: word-wrap;
         }
     }
@@ -2030,8 +2372,122 @@ component DictionaryCard inherits Rectangle {
     }
 }
 
+// ── Phase 20: Interface language picker card ──────────────────────────────────
+//
+// Placed at the TOP of Settings → System tab. Radio-style toggle: Tiếng Việt / English.
+// Changing locale fires `locale-changed(code)` where code ∈ "vi" | "en".
+// Rust writes locale.txt + rebuilds LocaleStrings + pushes to AppWindow.
+component LanguageCard inherits Rectangle {
+    in property <string> current-locale: "vi";    // "vi" | "en"
+    in property <string> label-text: "Ngôn ngữ giao diện / Interface language";
+    callback locale-changed(string);
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: Tokens.accent;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.label-text;
+                font-size: Tokens.font-secondary;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+            }
+        }
+
+        // Radio row: Tiếng Việt
+        vi-row := TouchArea {
+            height: 36px;
+            clicked => { root.locale-changed("vi"); }
+            HorizontalBox {
+                spacing: 10px;
+                alignment: start;
+
+                // Radio dot
+                Rectangle {
+                    width: 18px; height: 18px; border-radius: 9px;
+                    border-width: 2px;
+                    border-color: root.current-locale == "vi" ? Tokens.accent : Tokens.border;
+                    background: transparent;
+                    y: (parent.height - self.height) / 2;
+                    animate border-color { duration: 100ms; }
+
+                    Rectangle {
+                        width: 10px; height: 10px; border-radius: 5px;
+                        background: root.current-locale == "vi" ? Tokens.accent : transparent;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        animate background { duration: 100ms; }
+                    }
+                }
+
+                Text {
+                    text: "🇻🇳  Tiếng Việt";
+                    font-size: Tokens.font-secondary;
+                    color: root.current-locale == "vi" ? Tokens.text-primary : Tokens.text-secondary;
+                    font-weight: root.current-locale == "vi" ? 600 : 400;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Radio row: English
+        en-row := TouchArea {
+            height: 36px;
+            clicked => { root.locale-changed("en"); }
+            HorizontalBox {
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    width: 18px; height: 18px; border-radius: 9px;
+                    border-width: 2px;
+                    border-color: root.current-locale == "en" ? Tokens.accent : Tokens.border;
+                    background: transparent;
+                    y: (parent.height - self.height) / 2;
+                    animate border-color { duration: 100ms; }
+
+                    Rectangle {
+                        width: 10px; height: 10px; border-radius: 5px;
+                        background: root.current-locale == "en" ? Tokens.accent : transparent;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        animate background { duration: 100ms; }
+                    }
+                }
+
+                Text {
+                    text: "🇬🇧  English";
+                    font-size: Tokens.font-secondary;
+                    color: root.current-locale == "en" ? Tokens.text-primary : Tokens.text-secondary;
+                    font-weight: root.current-locale == "en" ? 600 : 400;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 component SettingsScreen inherits Rectangle {
     in-out property <string> current-tab;
+
+    // ─ Phase 20: locale strings + interface language picker
+    in property <LocaleStrings> locale-strings;
+    in property <string> current-locale: "vi";
+    callback locale-changed(string);
 
     // ─ Audio-source card props
     in property <[string]> audio-sources;
@@ -2092,11 +2548,31 @@ component SettingsScreen inherits Rectangle {
     in property <bool>     crash-report-restart-hint: false;
     callback crash-reporting-toggled(bool);
 
+    // ─ Phase 17: Voice Typing settings
+    in-out property <bool> voice-typing-enabled: false;
+    in property <string> voice-typing-state: "idle";
+    in-out property <int> voice-typing-max-duration-secs: 10;
+    in-out property <string> voice-typing-language: "vi";
+    callback voice-typing-toggled(bool);
+    callback voice-typing-max-duration-changed(int);
+    callback voice-typing-language-changed(string);
+
+    // ─ Phase 18: Speaker diarization (Soniox only)
+    in-out property <bool> diarization-enabled: false;
+    callback diarization-toggled(bool);
+
     // ─ Phase 10: Auto-summary
     in property <bool> auto-summary-enabled: false;
     in property <bool> auto-summary-has-key: false;
     callback auto-summary-toggled(bool);
     callback summary-regenerate-clicked(int);
+
+    // ─ Phase 19: Auto-update
+    in-out property <bool> auto-update-enabled: true;
+    in property <string> auto-update-current-version: "";
+    in property <string> auto-update-latest-version: "";
+    callback auto-update-toggled(bool);
+    callback auto-update-check-now();
 
     background: Tokens.bg;
 
@@ -2124,32 +2600,32 @@ component SettingsScreen inherits Rectangle {
                 alignment: start;
 
                 SettingsTabButton {
-                    icon: "⚙";  label: "System";        tab-id: "system";
+                    icon: "⚙";  label: root.locale-strings.tab-system;        tab-id: "system";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "system"; }
                 }
                 SettingsTabButton {
-                    icon: "⌨";  label: "Voice Typing";  tab-id: "voice-typing";
+                    icon: "⌨";  label: root.locale-strings.tab-voice-typing;  tab-id: "voice-typing";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "voice-typing"; }
                 }
                 SettingsTabButton {
-                    icon: "🎙";  label: "Recording";     tab-id: "recording";
+                    icon: "🎙";  label: root.locale-strings.tab-recording;     tab-id: "recording";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "recording"; }
                 }
                 SettingsTabButton {
-                    icon: "🌐";  label: "Language";      tab-id: "language";
+                    icon: "🌐";  label: root.locale-strings.tab-language;      tab-id: "language";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "language"; }
                 }
                 SettingsTabButton {
-                    icon: "📖";  label: "Dictionary";    tab-id: "dictionary";
+                    icon: "📖";  label: root.locale-strings.tab-dictionary;    tab-id: "dictionary";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "dictionary"; }
                 }
                 SettingsTabButton {
-                    icon: "🔔";  label: "Notification";  tab-id: "notification";
+                    icon: "🔔";  label: root.locale-strings.tab-notification;  tab-id: "notification";
                     current-tab: root.current-tab;
                     selected => { root.current-tab = "notification"; }
                 }
@@ -2170,16 +2646,25 @@ component SettingsScreen inherits Rectangle {
                     if root.current-tab == "system": VerticalLayout {
                         spacing: 12px;
                         Text {
-                            text: "System";
+                            text: root.locale-strings.section-system;
                             font-size: Tokens.font-h1;
                             font-weight: 700;
                             color: Tokens.text-primary;
                         }
                         Text {
-                            text: "STT engine + thông tin ứng dụng";
+                            text: root.locale-strings.section-system-sub;
                             font-size: Tokens.font-secondary;
                             color: Tokens.text-secondary;
                         }
+
+                        // ── Phase 20: Interface language picker — TOP of System tab ──
+                        LanguageCard {
+                            current-locale: root.current-locale;
+                            label-text: root.locale-strings.interface-language;
+                            locale-changed(code) => { root.locale-changed(code); }
+                        }
+                        // ── end Phase 20 ──────────────────────────────────────────────
+
                         ProviderCard {
                             provider-options: root.provider-options;
                             current-provider: root.current-provider;
@@ -2197,6 +2682,16 @@ component SettingsScreen inherits Rectangle {
                         }
                         // ── end Phase 9 ─────────────────────────────────────
 
+                        // ── Phase 19: Auto-update ─────────────────────────────
+                        AutoUpdateCard {
+                            auto-update-enabled <=> root.auto-update-enabled;
+                            current-version: root.auto-update-current-version;
+                            latest-version: root.auto-update-latest-version;
+                            auto-update-toggled(v) => { root.auto-update-toggled(v); }
+                            check-now => { root.auto-update-check-now(); }
+                        }
+                        // ── end Phase 19 ─────────────────────────────────────
+
                         // ── Phase 10: Auto-summary (OpenAI) ──────────────────
                         AutoSummaryCard {
                             auto-summary-enabled: root.auto-summary-enabled;
@@ -2204,6 +2699,13 @@ component SettingsScreen inherits Rectangle {
                             auto-summary-toggled(v) => { root.auto-summary-toggled(v); }
                         }
                         // ── end Phase 10 ─────────────────────────────────────
+
+                        // ── Phase 18: Diarization (Soniox only) ──────────────
+                        DiarizationCard {
+                            diarization-enabled <=> root.diarization-enabled;
+                            toggled(v) => { root.diarization-toggled(v); }
+                        }
+                        // ── end Phase 18 ─────────────────────────────────────
 
                         // About card — version + tech stack + license
                         Rectangle {
@@ -2259,22 +2761,196 @@ component SettingsScreen inherits Rectangle {
                         }
                     }
 
-                    if root.current-tab == "voice-typing": SettingsPlaceholder {
-                        tab-name: "Voice Typing";
-                        icon: "⌨";
-                        min-height: 320px;
-                    }
-
-                    if root.current-tab == "recording": VerticalLayout {
+                    if root.current-tab == "voice-typing": VerticalLayout {
                         spacing: 12px;
                         Text {
-                            text: "Recording";
+                            text: root.locale-strings.section-voice-typing;
                             font-size: Tokens.font-h1;
                             font-weight: 700;
                             color: Tokens.text-primary;
                         }
                         Text {
-                            text: "Nguồn âm thanh, VAD, mô hình Whisper";
+                            text: root.locale-strings.section-voice-typing-sub;
+                            font-size: Tokens.font-secondary;
+                            color: Tokens.text-secondary;
+                            wrap: word-wrap;
+                        }
+
+                        // ── Enable toggle card ───────────────────────────────
+                        Rectangle {
+                            background: Tokens.surface;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Tokens.border;
+                            height: 72px;
+                            HorizontalBox {
+                                padding: 16px;
+                                alignment: space-between;
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Bật Voice Typing (Ctrl+Shift+V)";
+                                        font-size: Tokens.font-body;
+                                        font-weight: 600;
+                                        color: Tokens.text-primary;
+                                    }
+                                    // State badge shown when active
+                                    if root.voice-typing-state != "idle": Text {
+                                        text: root.voice-typing-state == "listening"    ? "● Đang nghe…"
+                                            : root.voice-typing-state == "transcribing" ? "⏳ Đang xử lý…"
+                                            : root.voice-typing-state == "injecting"    ? "⌨ Đang gõ…"
+                                            : "";
+                                        font-size: Tokens.font-caption;
+                                        color: root.voice-typing-state == "listening" ? Tokens.danger : Tokens.accent;
+                                    }
+                                }
+                                // Toggle switch
+                                vt-toggle := TouchArea {
+                                    width: 44px;
+                                    height: 24px;
+                                    clicked => {
+                                        root.voice-typing-enabled = !root.voice-typing-enabled;
+                                        root.voice-typing-toggled(root.voice-typing-enabled);
+                                    }
+                                    Rectangle {
+                                        background: root.voice-typing-enabled ? Tokens.accent : Tokens.border;
+                                        border-radius: 12px;
+                                        width: 44px; height: 24px;
+                                        animate background { duration: 120ms; }
+                                        Rectangle {
+                                            x: root.voice-typing-enabled ? 22px : 2px;
+                                            y: 2px;
+                                            width: 20px; height: 20px;
+                                            background: white;
+                                            border-radius: 10px;
+                                            animate x { duration: 120ms; }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Max duration slider card ─────────────────────────
+                        Rectangle {
+                            background: Tokens.surface;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Tokens.border;
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 8px;
+                                HorizontalBox {
+                                    alignment: space-between;
+                                    Text {
+                                        text: "Thời lượng tối đa";
+                                        font-size: Tokens.font-body;
+                                        font-weight: 600;
+                                        color: Tokens.text-primary;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.voice-typing-max-duration-secs + "s";
+                                        font-size: Tokens.font-body;
+                                        font-weight: 600;
+                                        color: Tokens.accent;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Slider {
+                                    minimum: 1;
+                                    maximum: 30;
+                                    value: root.voice-typing-max-duration-secs;
+                                    changed(v) => {
+                                        root.voice-typing-max-duration-secs = round(v);
+                                        root.voice-typing-max-duration-changed(root.voice-typing-max-duration-secs);
+                                    }
+                                }
+                                Text {
+                                    text: "VAD tự dừng sau 1.5s im lặng hoặc khi đạt giới hạn này";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-hint;
+                                }
+                            }
+                        }
+
+                        // ── Language picker card ─────────────────────────────
+                        Rectangle {
+                            background: Tokens.surface;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Tokens.border;
+                            VerticalBox {
+                                padding: 16px;
+                                spacing: 8px;
+                                Text {
+                                    text: "Ngôn ngữ nhận dạng";
+                                    font-size: Tokens.font-body;
+                                    font-weight: 600;
+                                    color: Tokens.text-primary;
+                                }
+                                ComboBox {
+                                    model: ["🇻🇳  Tiếng Việt (vi)", "🇬🇧  English (en)", "🇯🇵  日本語 (ja)", "🇨🇳  中文 (zh)", "🇰🇷  한국어 (ko)"];
+                                    current-value: root.voice-typing-language == "vi" ? "🇻🇳  Tiếng Việt (vi)"
+                                                 : root.voice-typing-language == "en" ? "🇬🇧  English (en)"
+                                                 : root.voice-typing-language == "ja" ? "🇯🇵  日本語 (ja)"
+                                                 : root.voice-typing-language == "zh" ? "🇨🇳  中文 (zh)"
+                                                 : root.voice-typing-language == "ko" ? "🇰🇷  한국어 (ko)"
+                                                 : "🇻🇳  Tiếng Việt (vi)";
+                                    selected(v) => {
+                                        root.voice-typing-language =
+                                            v == "🇻🇳  Tiếng Việt (vi)" ? "vi"
+                                          : v == "🇬🇧  English (en)"     ? "en"
+                                          : v == "🇯🇵  日本語 (ja)"       ? "ja"
+                                          : v == "🇨🇳  中文 (zh)"         ? "zh"
+                                          : v == "🇰🇷  한국어 (ko)"        ? "ko"
+                                          : "vi";
+                                        root.voice-typing-language-changed(root.voice-typing-language);
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Privacy note ─────────────────────────────────────
+                        Rectangle {
+                            background: #0d1a0d;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: #1a3a1a;
+                            VerticalBox {
+                                padding: 12px;
+                                spacing: 4px;
+                                HorizontalBox {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    Text { text: "🔒"; font-size: 14px; vertical-alignment: center; }
+                                    Text {
+                                        text: "Voice Typing chỉ dùng Whisper local — âm thanh không bao giờ rời máy bạn";
+                                        font-size: Tokens.font-caption;
+                                        color: Tokens.success;
+                                        wrap: word-wrap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: "Hiện chỉ hỗ trợ Windows. macOS/Linux: đang phát triển.";
+                                    font-size: Tokens.font-caption;
+                                    color: Tokens.text-hint;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.current-tab == "recording": VerticalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: root.locale-strings.section-recording;
+                            font-size: Tokens.font-h1;
+                            font-weight: 700;
+                            color: Tokens.text-primary;
+                        }
+                        Text {
+                            text: root.locale-strings.section-recording-sub;
                             font-size: Tokens.font-secondary;
                             color: Tokens.text-secondary;
                         }
@@ -2310,13 +2986,13 @@ component SettingsScreen inherits Rectangle {
                     if root.current-tab == "language": VerticalLayout {
                         spacing: 12px;
                         Text {
-                            text: "Language";
+                            text: root.locale-strings.section-language;
                             font-size: Tokens.font-h1;
                             font-weight: 700;
                             color: Tokens.text-primary;
                         }
                         Text {
-                            text: "Ngôn ngữ nguồn (Bản gốc) + đích (Bản dịch)";
+                            text: root.locale-strings.section-language-sub;
                             font-size: Tokens.font-secondary;
                             color: Tokens.text-secondary;
                         }
@@ -2349,7 +3025,7 @@ component SettingsScreen inherits Rectangle {
                     }
 
                     if root.current-tab == "notification": SettingsPlaceholder {
-                        tab-name: "Notification";
+                        tab-name: root.locale-strings.tab-notification;
                         icon: "🔔";
                         min-height: 320px;
                     }
@@ -2895,6 +3571,72 @@ export component AppWindow inherits Window {
     background: Tokens.bg;
     icon: @image-url("../assets/icon-64.png");
 
+    // ── Phase 20: Locale strings — pushed by Rust on startup + on locale toggle ─
+    // Defaults to Vietnamese so the UI is never blank before Rust pushes the struct.
+    in property <LocaleStrings> locale-strings: {
+        tap-to-record: "Nhấn để ghi",
+        recording-active: "● Đang ghi…  (nhấn để dừng)",
+        transcript-original: "Bản gốc",
+        transcript-translated: "Bản dịch",
+        waiting-speech: "Đang chờ giọng nói…",
+        col-hint-original: "Whisper auto-detect sẽ điền cột này ngay\nkhi mỗi utterance được nhận diện.",
+        col-hint-translated: "Whisper với gợi ý tiếng Việt điền cột này\nsau khi pass đầu hoàn tất.",
+        silence-placeholder: "(im lặng)",
+        no-translation: "(không có)",
+        translating: "⏳  đang dịch…",
+        history-title: "Tìm + Lịch sử",
+        history-empty: "Chưa có phiên nào được lưu.",
+        search-placeholder: "Tìm trong tất cả phiên ghi…",
+        export-btn: "📥  Xuất phiên mới nhất → Markdown",
+        tab-system: "System",
+        tab-voice-typing: "Voice Typing",
+        tab-recording: "Recording",
+        tab-language: "Language",
+        tab-dictionary: "Dictionary",
+        tab-notification: "Notification",
+        settings-title: "Cài đặt",
+        section-system: "System",
+        section-system-sub: "STT engine + thông tin ứng dụng",
+        section-recording: "Recording",
+        section-recording-sub: "Nguồn âm thanh, VAD, mô hình Whisper",
+        section-language: "Language",
+        section-language-sub: "Ngôn ngữ nguồn (Bản gốc) + đích (Bản dịch)",
+        section-voice-typing: "Voice Typing",
+        section-voice-typing-sub: "Nhấn tổ hợp phím bất cứ đâu để nói, văn bản sẽ tự động gõ vào ứng dụng đang focus",
+        stt-engine: "STT engine",
+        audio-source: "Nguồn âm thanh",
+        crash-reporting: "Báo cáo lỗi (Sentry)",
+        auto-update: "Cập nhật tự động",
+        auto-summary: "Tóm tắt phiên (AI)",
+        diarization: "Nhận diện người nói (chỉ Soniox)",
+        whisper-model: "Mô hình Whisper",
+        dictionary-title: "Từ điển tùy chỉnh",
+        language-card: "Ngôn ngữ",
+        interface-language: "Ngôn ngữ giao diện / Interface language",
+        locale-vi: "Tiếng Việt",
+        locale-en: "English",
+        session-summary: "Tóm tắt phiên",
+        session-content: "Nội dung phiên",
+        session-no-segments: "Chưa có đoạn nào được ghi.",
+        summary-idle: "Chưa có tóm tắt. Bật tự động tóm tắt hoặc nhấn Tạo lại.",
+        summary-computing: "Đang tạo tóm tắt…",
+        summary-needs-key: "Cần API key OpenAI — cấu hình trong Cài đặt → System.",
+        btn-regenerate: "↺ Tạo lại",
+        btn-copy: "📋 Sao chép",
+        placeholder-coming: "Tính năng sẽ có ở bản kế tiếp.",
+        restart-to-apply: "↻  Đã lưu — khởi động lại Vọng AI Recorder để áp dụng",
+        toggle-on: "Đang bật",
+        toggle-off: "Đang tắt",
+        btn-save: "💾  Lưu key",
+        btn-check-now: "Kiểm tra ngay",
+        btn-add: "+ Thêm",
+        api-key-label: "API key (lưu vào Keychain):",
+    };
+    // Current locale code ("vi" | "en") — drives LanguageCard radio highlight.
+    in property <string> current-locale: "vi";
+    // Fired when user picks a different language in Settings → System.
+    callback locale-changed(string);
+
     // Driven by Rust at ~30 fps via Slint Timer.
     //   peak-level       — [0.0, 1.0] from vong-audio PeakMeter
     //   audio-status     — device + sample rate, or error if mic unavailable
@@ -3037,11 +3779,40 @@ export component AppWindow inherits Window {
     in-out property <bool> wizard-crash-reporting-consent: false;
     callback wizard-crash-reporting-changed(bool);
 
+    // ─ Phase 18: Speaker diarization (Soniox only) ───────────────────────────
+    // Loaded from diarization.txt at startup. Default OFF for backward compat.
+    // Only consumed by SonioxProvider — Whisper/OpenAI providers ignore it.
+    in-out property <bool> diarization-enabled: false;
+    callback diarization-toggled(bool);
+
     // ─ Phase 10: Auto-summary (OpenAI gpt-4o-mini) ───────────────────────────
     in property <bool> auto-summary-enabled: false;
     in property <bool> auto-summary-has-key: false;
     callback auto-summary-toggled(bool);
     callback summary-regenerate-clicked(int);
+
+    // ─ Phase 19: Auto-update ─────────────────────────────────────────────────
+    // Loaded from auto_update.txt at startup. Default ON (opt-out).
+    in-out property <bool> auto-update-enabled: true;
+    // Populated after check_for_update() completes; "" = not yet checked.
+    in property <string> auto-update-current-version: "";
+    in property <string> auto-update-latest-version: "";
+    callback auto-update-toggled(bool);
+    callback auto-update-check-now();
+
+    // ─ Phase 17: Voice Typing ────────────────────────────────────────────────
+    // Default OFF — user must opt in explicitly (text injection is sensitive).
+    in-out property <bool> voice-typing-enabled: false;
+    // "idle" | "listening" | "transcribing" | "injecting" | "error"
+    // Pushed by Rust 30 Hz timer from VoiceTypingHandle.
+    in property <string> voice-typing-state: "idle";
+    // Configurable 1-30 s (default 10).
+    in-out property <int> voice-typing-max-duration-secs: 10;
+    // Source language ISO 639-1 (default "vi").
+    in-out property <string> voice-typing-language: "vi";
+    callback voice-typing-toggled(bool);
+    callback voice-typing-max-duration-changed(int);
+    callback voice-typing-language-changed(string);
 
     // ─ Phase 13: Toast banner stack ──────────────────────────────────────────
     // Rust 30 Hz timer pushes this from ToastQueue::snapshot().
@@ -3172,6 +3943,14 @@ export component AppWindow inherits Window {
             detail-summary-state: detail-summary-state;
             detail-error-message: detail-error-message;
             detail-segments: detail-segments;
+            lbl-session-summary: locale-strings.session-summary;
+            lbl-regenerate: locale-strings.btn-regenerate;
+            lbl-copy: locale-strings.btn-copy;
+            lbl-computing: locale-strings.summary-computing;
+            lbl-needs-key: locale-strings.summary-needs-key;
+            lbl-idle: locale-strings.summary-idle;
+            lbl-content: locale-strings.session-content;
+            lbl-no-segments: locale-strings.session-no-segments;
             back-clicked => { root.current-view = "main"; }
             detail-regenerate-clicked(id) => { root.detail-regenerate-clicked(id); }
             detail-copy-clicked(id) => { root.detail-copy-clicked(id); }
@@ -3180,6 +3959,9 @@ export component AppWindow inherits Window {
         // ─── Settings view ───
         if current-view == "settings": SettingsScreen {
             current-tab <=> current-settings-tab;
+            locale-strings: locale-strings;
+            current-locale: current-locale;
+            locale-changed(code) => { root.locale-changed(code); }
             vertical-stretch: 1;
 
             audio-sources: audio-sources;
@@ -3237,11 +4019,31 @@ export component AppWindow inherits Window {
             crash-report-restart-hint: crash-reporting-restart-hint;
             crash-reporting-toggled(v) => { root.crash-reporting-toggled(v); }
 
+            // ── Phase 17: Voice Typing
+            voice-typing-enabled <=> voice-typing-enabled;
+            voice-typing-state: voice-typing-state;
+            voice-typing-max-duration-secs <=> voice-typing-max-duration-secs;
+            voice-typing-language <=> voice-typing-language;
+            voice-typing-toggled(v) => { root.voice-typing-toggled(v); }
+            voice-typing-max-duration-changed(s) => { root.voice-typing-max-duration-changed(s); }
+            voice-typing-language-changed(l) => { root.voice-typing-language-changed(l); }
+
+            // ── Phase 18: Diarization toggle
+            diarization-enabled <=> diarization-enabled;
+            diarization-toggled(v) => { root.diarization-toggled(v); }
+
             // ── Phase 10: Auto-summary
             auto-summary-enabled: auto-summary-enabled;
             auto-summary-has-key: auto-summary-has-key;
             auto-summary-toggled(v) => { root.auto-summary-toggled(v); }
             summary-regenerate-clicked(id) => { root.summary-regenerate-clicked(id); }
+
+            // ── Phase 19: Auto-update
+            auto-update-enabled <=> auto-update-enabled;
+            auto-update-current-version: auto-update-current-version;
+            auto-update-latest-version: auto-update-latest-version;
+            auto-update-toggled(v) => { root.auto-update-toggled(v); }
+            auto-update-check-now => { root.auto-update-check-now(); }
         }
 
         // ─── Main view: two-column body. Sidebar left, transcript-dominated main right.
@@ -3280,12 +4082,16 @@ export component AppWindow inherits Window {
                             history-model: history-model;
                             search-text: history-status;
                             is-searching: history-is-searching;
+                            title-text: locale-strings.history-title;
+                            empty-text: locale-strings.history-empty;
+                            search-placeholder-text: locale-strings.search-placeholder;
                             search-changed(q) => { root.search-changed(q); }
                             row-clicked(id) => { root.history-row-clicked(id); }
                         }
 
                         ExportCard {
                             status: export-status;
+                            btn-text: locale-strings.export-btn;
                             export-clicked => {
                                 root.export-clicked();
                             }
@@ -3332,20 +4138,30 @@ export component AppWindow inherits Window {
 
                         TranscriptColumn {
                             lines: transcript-lines;
-                            title: "Bản gốc";
+                            title: locale-strings.transcript-original;
                             use-original: true;
                             accent-color: #4ADE80; // success green — real-time / first
                             radius-br: 96px; // heavy curve toward the mic button
                             horizontal-stretch: 1;
+                            waiting-text: locale-strings.waiting-speech;
+                            col-hint-text: locale-strings.col-hint-original;
+                            silence-text: locale-strings.silence-placeholder;
+                            no-translation-text: locale-strings.no-translation;
+                            translating-text: locale-strings.translating;
                         }
 
                         TranscriptColumn {
                             lines: transcript-lines;
-                            title: "Bản dịch";
+                            title: locale-strings.transcript-translated;
                             use-original: false;
                             accent-color: Tokens.accent; // violet — translated
                             radius-bl: 96px; // heavy curve toward the mic button
                             horizontal-stretch: 1;
+                            waiting-text: locale-strings.waiting-speech;
+                            col-hint-text: locale-strings.col-hint-translated;
+                            silence-text: locale-strings.silence-placeholder;
+                            no-translation-text: locale-strings.no-translation;
+                            translating-text: locale-strings.translating;
                         }
                     }
 
@@ -3373,7 +4189,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text {
-                            text: recording ? "● Đang ghi…  (nhấn để dừng)" : "Nhấn để ghi";
+                            text: recording ? locale-strings.recording-active : locale-strings.tap-to-record;
                             font-size: Tokens.font-caption;
                             font-weight: recording ? 700 : 400;
                             color: recording ? Tokens.danger : Tokens.text-hint;
@@ -3449,6 +4265,54 @@ export component AppWindow inherits Window {
                 x: 0; y: 0;
                 width: parent.width; height: 1px;
                 background: Tokens.border;
+            }
+        }
+    }
+
+    // ── Phase 17: Voice Typing state badge — top-center overlay ─────────────
+    // Non-blocking badge shown when a voice-typing session is active.
+    // Rendered outside the VerticalBox so it floats above the main content.
+    if voice-typing-state != "idle": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 12px;
+        width: 240px;
+        height: 36px;
+        background: voice-typing-state == "listening"    ? #3a0a0a
+                  : voice-typing-state == "transcribing" ? #1a1a3a
+                  : voice-typing-state == "injecting"    ? #0a2a0a
+                  : #2a0a0a;
+        border-radius: 18px;
+        border-width: 1px;
+        border-color: voice-typing-state == "listening"    ? Tokens.danger
+                    : voice-typing-state == "transcribing" ? Tokens.accent
+                    : voice-typing-state == "injecting"    ? Tokens.success
+                    : Tokens.border;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000066;
+        HorizontalBox {
+            spacing: 8px;
+            alignment: center;
+            Text {
+                text: voice-typing-state == "listening"    ? "●"
+                    : voice-typing-state == "transcribing" ? "⏳"
+                    : voice-typing-state == "injecting"    ? "⌨"
+                    : "!";
+                font-size: 14px;
+                color: voice-typing-state == "listening"    ? Tokens.danger
+                     : voice-typing-state == "transcribing" ? Tokens.accent
+                     : voice-typing-state == "injecting"    ? Tokens.success
+                     : Tokens.text-hint;
+                vertical-alignment: center;
+            }
+            Text {
+                text: voice-typing-state == "listening"    ? "Đang nghe…"
+                    : voice-typing-state == "transcribing" ? "Đang xử lý…"
+                    : voice-typing-state == "injecting"    ? "Đang gõ…"
+                    : "Lỗi";
+                font-size: Tokens.font-caption;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
             }
         }
     }

@@ -60,6 +60,61 @@ impl VadParams {
     }
 }
 
+/// Voice Typing sub-configuration embedded in `RecordingConfig`.
+///
+/// Persisted inside `recording.json` under the `"voice_typing"` key.
+/// Default OFF — user must opt in explicitly (text injection is sensitive).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VoiceTypingConfig {
+    /// Master toggle. `false` (default) = hotkey is ignored, no injection occurs.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hotkey as a stable string representation (e.g. "Ctrl+Shift+V").
+    /// Stored even though rebind is deferred to Sprint 5 — future-proofs the
+    /// config format without forcing a migration.
+    #[serde(default = "default_voice_typing_hotkey")]
+    pub hotkey: String,
+    /// Maximum recording length in seconds before force-pack [1 – 30]. Default 10.
+    #[serde(default = "default_voice_typing_max_duration_secs")]
+    pub max_duration_secs: u32,
+    /// Source language hint for Whisper (ISO 639-1). Default "vi".
+    #[serde(default = "default_voice_typing_language")]
+    pub language: String,
+}
+
+fn default_voice_typing_hotkey() -> String {
+    "Ctrl+Shift+V".to_string()
+}
+
+fn default_voice_typing_max_duration_secs() -> u32 {
+    10
+}
+
+fn default_voice_typing_language() -> String {
+    "vi".to_string()
+}
+
+impl Default for VoiceTypingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: default_voice_typing_hotkey(),
+            max_duration_secs: default_voice_typing_max_duration_secs(),
+            language: default_voice_typing_language(),
+        }
+    }
+}
+
+impl VoiceTypingConfig {
+    /// Clamp `max_duration_secs` to [1, 30]. Called after deserialization.
+    pub fn clamp_in_place(&mut self) {
+        self.max_duration_secs = self.max_duration_secs.clamp(1, 30);
+        if self.language.trim().is_empty() {
+            self.language = default_voice_typing_language();
+        }
+    }
+}
+
 /// Root recording configuration persisted to `recording.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingConfig {
@@ -74,6 +129,9 @@ pub struct RecordingConfig {
     /// search ladder in `WhisperLocalProvider::resolve_default_model_path()`.
     #[serde(default)]
     pub whisper_model_path: Option<PathBuf>,
+    /// Voice Typing feature configuration.
+    #[serde(default)]
+    pub voice_typing: VoiceTypingConfig,
 }
 
 fn default_version() -> u32 {
@@ -86,6 +144,7 @@ impl Default for RecordingConfig {
             version: 1,
             vad: VadParams::default(),
             whisper_model_path: None,
+            voice_typing: VoiceTypingConfig::default(),
         }
     }
 }
@@ -129,10 +188,13 @@ pub fn load() -> RecordingConfig {
     match serde_json::from_str::<RecordingConfig>(&content) {
         Ok(mut cfg) => {
             cfg.vad.clamp_in_place();
+            cfg.voice_typing.clamp_in_place();
             tracing::debug!(
                 threshold = cfg.vad.threshold,
                 hangover_ms = cfg.vad.hangover_ms,
                 max_duration_ms = cfg.vad.max_duration_ms,
+                vt_enabled = cfg.voice_typing.enabled,
+                vt_max_secs = cfg.voice_typing.max_duration_secs,
                 "recording.json loaded"
             );
             cfg

@@ -419,10 +419,19 @@ fn build_provider_task(
     runtime: &tokio::runtime::Handle,
     toast_queue_opt: Option<ToastQueue>,
 ) -> Option<JoinHandle<()>> {
+    // Diarization is only honored by Soniox — load the persisted toggle so the
+    // provider knows whether to include `enable_speaker_diarization` in the
+    // config message. Whisper local and OpenAI Realtime always ignore this flag.
+    let diarization_enabled = crate::read_diarization_enabled();
+    tracing::debug!(diarization_enabled, "build_provider_task: diarization flag loaded");
+
     let opts = StreamOpts {
         language_hint: Some("vi".into()),
         enable_lid: false,
-        enable_diarization: false,
+        // Only set for Soniox — Whisper/OpenAI ignore it, but we pass the
+        // loaded flag here so SonioxProvider can gate `enable_speaker_diarization`
+        // in its config message without any extra wiring.
+        enable_diarization: diarization_enabled,
         enable_translation_to: None,
     };
 

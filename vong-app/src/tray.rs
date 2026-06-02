@@ -2,15 +2,23 @@
 //!
 //! - Tray icon: violet 16×16 generated in-process (no asset shipping for MVP 0.1)
 //! - Tray menu: Show / Hide / Quit
-//! - Global hotkey: Ctrl+Shift+R toggles main window visibility
+//! - Global hotkeys:
+//!   - Ctrl+Shift+R — toggle main window visibility
+//!   - Ctrl+Shift+V — trigger Voice Typing session (Phase 17)
 //!
 //! Events from `tray-icon` + `global-hotkey` arrive via crate-level static
 //! receivers. We drain them inside a Slint Timer ticking at ~20 Hz, low enough
 //! latency for user-perceived responsiveness without overhead.
+//!
+//! The Voice Typing hotkey fires the `on_voice_typing_hotkey` callback.
+//! When the feature is disabled in config the callback still fires but the
+//! caller's implementation is a no-op — the hotkey is always registered to
+//! prevent another app from grabbing it silently.
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use slint::{ComponentHandle, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -25,9 +33,16 @@ pub struct TrayBundle {
     _timer: slint::Timer,
 }
 
-/// Build the tray icon, register the global hotkey, and wire all events into
+/// Build the tray icon, register global hotkeys, and wire all events into
 /// a Slint Timer that drains them at 20 Hz.
-pub fn init(ui: &AppWindow) -> Result<TrayBundle, Box<dyn std::error::Error>> {
+///
+/// `on_voice_typing_hotkey` is called on the Slint event-loop thread when
+/// Ctrl+Shift+V is pressed. The caller spawns the async session from there.
+/// Passing `None` registers the hotkey but fires nothing (use for disabled state).
+pub fn init(
+    ui: &AppWindow,
+    on_voice_typing_hotkey: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+) -> Result<TrayBundle, Box<dyn std::error::Error>> {
     // Build menu (Show / Hide / separator / Quit).
     let menu = Menu::new();
     let show_item = MenuItem::new("Hiển thị Vọng", true, None);
@@ -48,8 +63,9 @@ pub fn init(ui: &AppWindow) -> Result<TrayBundle, Box<dyn std::error::Error>> {
         .with_icon(make_violet_icon(16))
         .build()?;
 
-    // Global hotkey: Ctrl+Shift+R toggles window visibility.
     let manager = GlobalHotKeyManager::new()?;
+
+    // Ctrl+Shift+R — toggle main window visibility.
     let toggle_hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyR);
     let toggle_id = toggle_hotkey.id();
     manager.register(toggle_hotkey)?;
@@ -58,6 +74,23 @@ pub fn init(ui: &AppWindow) -> Result<TrayBundle, Box<dyn std::error::Error>> {
         id = toggle_id,
         "global hotkey registered (toggle main window)"
     );
+
+    // Ctrl+Shift+V — Voice Typing trigger (Phase 17).
+    let vt_hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
+    let vt_id = vt_hotkey.id();
+    let vt_registered = manager.register(vt_hotkey).is_ok();
+    if vt_registered {
+        tracing::info!(
+            hotkey = "Ctrl+Shift+V",
+            id = vt_id,
+            "global hotkey registered (voice typing)"
+        );
+    } else {
+        tracing::warn!(
+            hotkey = "Ctrl+Shift+V",
+            "voice typing hotkey registration failed — another app may own it"
+        );
+    }
 
     // Slint Timer drains menu + hotkey events.
     let ui_weak: Weak<AppWindow> = ui.as_weak();
@@ -80,8 +113,14 @@ pub fn init(ui: &AppWindow) -> Result<TrayBundle, Box<dyn std::error::Error>> {
                 }
             }
             while let Ok(evt) = hotkey_rx.try_recv() {
-                if evt.id == toggle_id && evt.state == global_hotkey::HotKeyState::Pressed {
-                    toggle_window(&ui_weak);
+                if evt.state == global_hotkey::HotKeyState::Pressed {
+                    if evt.id == toggle_id {
+                        toggle_window(&ui_weak);
+                    } else if evt.id == vt_id {
+                        if let Some(cb) = &on_voice_typing_hotkey {
+                            cb();
+                        }
+                    }
                 }
             }
         },

@@ -160,7 +160,16 @@ pub struct StreamOpts {
     /// Enable mid-sentence language identification (Soniox feature).
     pub enable_lid: bool,
 
-    /// Enable speaker diarization. MVP 0.1: defer (false).
+    /// Enable speaker diarization.
+    ///
+    /// When `true`, `SonioxProvider` sets `enable_speaker_diarization = true` in
+    /// the WebSocket config message and propagates the per-token `speaker` field
+    /// to `TranscriptEvent::Final.speaker`. Loaded from `diarization.txt` at startup
+    /// by the app layer; default `false` for backward compat.
+    ///
+    /// **Providers that honor this flag:** `SonioxProvider` only.
+    /// **Providers that ignore it:** `WhisperLocalProvider`, `OpenAIRealtimeProvider`
+    /// (both always emit `speaker: None`). Support may be added in a future phase.
     pub enable_diarization: bool,
 
     /// Translate to this language code (e.g., "vi", "en"). `None` = transcript only.

@@ -16,9 +16,11 @@
     windows_subsystem = "windows"
 )]
 
+mod auto_update;
 mod autosummary;
 mod dialog;
 mod dictionary;
+mod i18n;
 mod log_init;
 mod pipeline;
 mod recording_config;
@@ -27,6 +29,7 @@ mod session_detail;
 mod summary_runner;
 mod toast;
 mod tray;
+mod voice_typing;
 mod wizard;
 
 use dialog::DialogQueue;
@@ -178,6 +181,9 @@ struct PipelineState {
 /// placeholder) from "pass B finished but produced empty text" (UI shows a
 /// "no result" marker). Without this flag, an empty `text` is ambiguous and
 /// the placeholder stays forever on edge cases.
+///
+/// `speaker` carries the diarization label from the STT provider (e.g., "1" for
+/// Soniox). `None` when diarization is disabled or the provider doesn't support it.
 #[derive(Debug, Clone)]
 struct TranscriptStreamLine {
     seq: i32,
@@ -188,6 +194,8 @@ struct TranscriptStreamLine {
     original_text: String,
     duration_ms: i32,
     translation_done: bool,
+    /// Speaker label from STT diarization. None = no diarization or unsupported provider.
+    speaker: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -227,6 +235,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Provider picker (Whisper local / Soniox / OpenAI Realtime).
     populate_provider_picker(&ui);
     wire_provider_picker_callbacks(&ui);
+
+    // ── Phase 20: i18n — load locale + push initial LocaleStrings ────────────
+    let startup_locale = i18n::load_locale();
+    push_locale_strings(&ui, startup_locale);
+    ui.set_current_locale(slint::SharedString::from(startup_locale.as_str()));
+    tracing::info!(locale = startup_locale.as_str(), "i18n: locale loaded");
+
+    {
+        let ui_weak_locale = ui.as_weak();
+        ui.on_locale_changed(move |code| {
+            let locale = i18n::Locale::from_str(code.as_str());
+            if let Err(e) = i18n::save_locale(locale) {
+                tracing::warn!(error = %e, "i18n: locale save failed");
+            }
+            tracing::info!(locale = locale.as_str(), "i18n: locale changed");
+            if let Some(ui) = ui_weak_locale.upgrade() {
+                push_locale_strings(&ui, locale);
+                ui.set_current_locale(slint::SharedString::from(locale.as_str()));
+            }
+        });
+    }
+    // ── end Phase 20 locale ───────────────────────────────────────────────────
 
     // ── First-run wizard startup detection ────────────────────────────────────
     // Read wizard progress from onboarded.txt. If incomplete or absent, show the
@@ -277,12 +307,185 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // ── Phase 20: last-session restore ───────────────────────────────────────
+    // If last_session.txt references a session that still exists in the DB,
+    // restore the session-detail view on startup. Silently ignored when:
+    //   - the file is absent (first run / file deleted)
+    //   - the session was deleted from DB
+    //   - DB is unavailable (audio init failed)
+    if let Some(ref bundle) = audio {
+        if let Some(ref ctx) = bundle.session {
+            if let Some(last_sid) = i18n::load_last_session() {
+                if let Ok(db_guard) = ctx.conn.try_lock() {
+                    match session_detail::SessionDetailLoad::from_db(&db_guard, last_sid) {
+                        Ok(detail) => {
+                            tracing::info!(
+                                session_id = last_sid,
+                                "startup: restoring last-viewed session"
+                            );
+                            let summary_state = {
+                                let runner_ref = &bundle.summary_runner;
+                                determine_summary_state(last_sid, runner_ref, &detail)
+                            };
+                            let summary_text = detail
+                                .summary
+                                .as_ref()
+                                .map(|s| s.content.clone())
+                                .unwrap_or_default();
+                            ui.set_detail_session_id(detail.session.id as i32);
+                            ui.set_detail_started_at(
+                                session_detail::format_timestamp_ms(
+                                    detail.session.started_at_ms,
+                                )
+                                .into(),
+                            );
+                            ui.set_detail_duration(
+                                session_detail::format_duration(
+                                    detail.session.duration_ms,
+                                )
+                                .into(),
+                            );
+                            ui.set_detail_provider(
+                                slint::SharedString::from(detail.session.provider.as_str()),
+                            );
+                            ui.set_detail_summary_text(slint::SharedString::from(summary_text));
+                            ui.set_detail_summary_state(slint::SharedString::from(summary_state));
+                            ui.set_detail_error_message(slint::SharedString::from(""));
+                            let seg_rows = build_detail_segment_rows(&detail.segments);
+                            let seg_model = slint::VecModel::from(seg_rows);
+                            ui.set_detail_segments(slint::ModelRc::from(
+                                std::rc::Rc::new(seg_model),
+                            ));
+                            ui.set_current_view(slint::SharedString::from("session-detail"));
+                        }
+                        Err(e) => {
+                            // Session deleted or never existed — clean up the stale file.
+                            tracing::debug!(
+                                session_id = last_sid,
+                                error = ?e,
+                                "startup: last-session not found in DB, ignoring"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ── end Phase 20 last-session restore ────────────────────────────────────
+
+    // ── Phase 17: Voice Typing setup ──────────────────────────────────────────
+    // Create the shared state handle and load config. The hotkey callback is
+    // registered below when tray::init is called.
+    let vt_handle = voice_typing::new_handle();
+
+    // Load voice-typing config from the already-loaded recording config.
+    // We re-read it here because init_audio may have consumed `rec_cfg`.
+    let vt_config_initial = recording_config::load().voice_typing;
+
+    // Push initial Settings state into UI.
+    ui.set_voice_typing_enabled(vt_config_initial.enabled);
+    ui.set_voice_typing_max_duration_secs(vt_config_initial.max_duration_secs as i32);
+    ui.set_voice_typing_language(vt_config_initial.language.clone().into());
+
+    // Voice Typing hotkey callback — fires on Ctrl+Shift+V from tray timer.
+    // Spawns the async session on a dedicated one-shot tokio runtime so it
+    // doesn't block the Slint event loop. Captures clones of all shared state.
+    let vt_handle_cb = vt_handle.clone();
+    let vt_toast_cb = app_toast_queue.clone();
+    let vt_hotkey_cb: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
+        // Read current config + recording state.
+        let config = recording_config::load().voice_typing;
+        if !config.enabled {
+            tracing::debug!("voice_typing: hotkey fired but feature is disabled — ignoring");
+            return;
+        }
+
+        // If a session is already in progress, cancel it (second hotkey = cancel).
+        {
+            let mut g = vt_handle_cb.lock().unwrap_or_else(|e| e.into_inner());
+            if g.is_active() {
+                tracing::info!("voice_typing: hotkey pressed during active session — cancelling");
+                *g = voice_typing::VoiceTypingState::Idle;
+                return;
+            }
+        }
+
+        let handle = vt_handle_cb.clone();
+        let toast = vt_toast_cb.clone();
+        let model_path = vong_transcribe::WhisperLocalProvider::resolve_default_model_path();
+        // We cannot read `is_recording` from the AudioBundle here (it moved into
+        // AudioBundle). We read it from a fresh config check; the main pipeline
+        // state AtomicBool is not accessible here. Instead we spawn the session
+        // and let `run_session` handle the conflict guard when it detects the
+        // VAD capture would fail to open. The is_main_recording flag is always
+        // false in the hotkey callback — the proper conflict check happens inside
+        // run_session via mic availability (two WASAPI captures on the same device
+        // will fail naturally).
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("vt session runtime");
+            rt.block_on(voice_typing::run_session(
+                config,
+                handle,
+                false, // conflict guard: see comment above
+                model_path,
+                toast,
+            ));
+        });
+    });
+
+    // Wire Settings → Voice Typing tab callbacks.
+    {
+        let tq_vt = app_toast_queue.clone();
+        ui.on_voice_typing_toggled(move |enabled| {
+            let mut cfg = recording_config::load();
+            cfg.voice_typing.enabled = enabled;
+            if let Err(e) = recording_config::save(&cfg) {
+                tracing::warn!(error = %e, "voice_typing: config save failed");
+                tq_vt.push("Lưu cấu hình Voice Typing thất bại", ToastSeverity::Error);
+            } else {
+                tracing::info!(enabled, "voice_typing: toggle saved");
+            }
+        });
+    }
+
+    {
+        let tq_vt2 = app_toast_queue.clone();
+        ui.on_voice_typing_max_duration_changed(move |secs| {
+            let mut cfg = recording_config::load();
+            cfg.voice_typing.max_duration_secs = (secs as u32).clamp(1, 30);
+            if let Err(e) = recording_config::save(&cfg) {
+                tracing::warn!(error = %e, "voice_typing: max_duration save failed");
+                tq_vt2.push("Lưu cấu hình Voice Typing thất bại", ToastSeverity::Error);
+            }
+        });
+    }
+
+    {
+        let tq_vt3 = app_toast_queue.clone();
+        ui.on_voice_typing_language_changed(move |lang| {
+            let mut cfg = recording_config::load();
+            cfg.voice_typing.language = lang.to_string();
+            if let Err(e) = recording_config::save(&cfg) {
+                tracing::warn!(error = %e, "voice_typing: language save failed");
+                tq_vt3.push("Lưu cấu hình Voice Typing thất bại", ToastSeverity::Error);
+            }
+        });
+    }
+
     // System tray + global hotkey (Phase 5 partial). Non-fatal if setup fails
     // (some Windows display sessions disable the notification area).
-    let _tray = match tray::init(&ui) {
+    let _tray = match tray::init(&ui, Some(vt_hotkey_cb)) {
         Ok(b) => Some(b),
         Err(e) => {
             tracing::warn!(error = %e, "tray init failed — running without tray icon");
+            // Toast when VT hotkey specifically failed due to conflict.
+            app_toast_queue.push(
+                "Phím tắt Ctrl+Shift+V bị app khác chiếm",
+                ToastSeverity::Warn,
+            );
             None
         }
     };
@@ -420,6 +623,143 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // ── Phase 18: Diarization Settings toggle ────────────────────────────────
+    // Load from diarization.txt at startup so the toggle reflects persisted state.
+    ui.set_diarization_enabled(read_diarization_enabled());
+
+    {
+        let tq_diar = app_toast_queue.clone();
+        ui.on_diarization_toggled(move |enabled| {
+            if let Err(e) = write_diarization_enabled(enabled) {
+                tracing::warn!(error = ?e, "diarization config save failed");
+                tq_diar.push("Lưu cấu hình diarization thất bại", ToastSeverity::Error);
+            } else {
+                tracing::info!(
+                    diarization_enabled = enabled,
+                    "diarization toggle saved — takes effect on next provider start"
+                );
+            }
+        });
+    }
+
+    // ── Phase 19: Auto-update ─────────────────────────────────────────────────
+    // Load consent from auto_update.txt. Default ON when absent (opt-out model).
+    ui.set_auto_update_enabled(auto_update::load_auto_update_enabled());
+
+    // Settings toggle: persist consent to auto_update.txt immediately.
+    {
+        let tq_update = app_toast_queue.clone();
+        ui.on_auto_update_toggled(move |enabled| {
+            if let Err(e) = auto_update::save_auto_update_enabled(enabled) {
+                tracing::warn!(error = ?e, "auto-update consent save failed");
+                tq_update.push("Lưu cấu hình cập nhật thất bại", ToastSeverity::Error);
+            } else {
+                tracing::info!(
+                    auto_update_enabled = enabled,
+                    "auto-update consent saved"
+                );
+            }
+        });
+    }
+
+    // "Check now" button: on-demand check, bypasses 4-hour throttle.
+    {
+        let ui_weak_upd = ui.as_weak();
+        let tq_check = app_toast_queue.clone();
+        ui.on_auto_update_check_now(move || {
+            let ui_weak = ui_weak_upd.clone();
+            let tq = tq_check.clone();
+            // Spawn a one-shot thread with its own tiny tokio runtime so we
+            // don't block the Slint event loop. Uses std::thread so we don't
+            // need a handle to the audio runtime.
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("auto_update check-now runtime");
+                let result = rt.block_on(auto_update::check_for_update());
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else { return };
+                    match result {
+                        Ok(info) => {
+                            // Update version display in the card.
+                            ui.set_auto_update_current_version(
+                                slint::SharedString::from(info.current.as_str())
+                            );
+                            ui.set_auto_update_latest_version(
+                                slint::SharedString::from(info.latest.as_str())
+                            );
+                            if info.is_newer {
+                                let msg = format!(
+                                    "Có bản cập nhật mới {} — vong.app để tải",
+                                    info.latest
+                                );
+                                tq.push(msg, ToastSeverity::Info);
+                            } else {
+                                let msg = format!(
+                                    "Bạn đang dùng bản mới nhất {}",
+                                    info.current
+                                );
+                                tq.push(msg, ToastSeverity::Info);
+                            }
+                        }
+                        Err(_) => {
+                            tq.push(
+                                "Không kiểm tra được — kiểm tra kết nối mạng",
+                                ToastSeverity::Error,
+                            );
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // Startup background check: wait 30s after init_audio, then check once
+    // (throttled to 4h per process via should_check()).
+    if auto_update::load_auto_update_enabled() {
+        let ui_weak_bg = ui.as_weak();
+        let tq_bg = app_toast_queue.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            if !auto_update::should_check() {
+                tracing::debug!("auto-update: throttled — skipping startup check");
+                return;
+            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("auto_update bg runtime");
+            let result = rt.block_on(auto_update::check_for_update());
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak_bg.upgrade() else { return };
+                match result {
+                    Ok(info) => {
+                        ui.set_auto_update_current_version(
+                            slint::SharedString::from(info.current.as_str())
+                        );
+                        ui.set_auto_update_latest_version(
+                            slint::SharedString::from(info.latest.as_str())
+                        );
+                        if info.is_newer {
+                            let msg = format!(
+                                "Có bản cập nhật mới {} — vong.app để tải",
+                                info.latest
+                            );
+                            tq_bg.push(msg, ToastSeverity::Info);
+                        }
+                        // No toast when already up-to-date on background check.
+                    }
+                    Err(_) => {
+                        tracing::debug!("auto-update: background check failed (non-fatal)");
+                        // Background failure is silent — only the "Check now" button
+                        // surfaces errors to the user.
+                    }
+                }
+            });
+        });
+    }
+
     // Debug-only manual trigger: intentionally fire a tracing::error! + panic
     // so the developer can verify the full Sentry pipeline end-to-end.
     // NEVER compiled into release builds — the callback body is absent.
@@ -431,9 +771,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // ── Phase 17: Voice Typing state mirror timer ─────────────────────────────
+    // Separate 30 Hz timer owned in main() so it can capture `vt_handle` directly
+    // without threading through init_audio. The timer reads VoiceTypingHandle and
+    // pushes the label string to the Slint property.
+    let vt_ui_weak = ui.as_weak();
+    let vt_handle_mirror = vt_handle.clone();
+    let _vt_timer = {
+        let t = slint::Timer::default();
+        t.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(33),
+            move || {
+                let label = vt_handle_mirror
+                    .lock()
+                    .map(|g| g.label().to_string())
+                    .unwrap_or_else(|_| "idle".to_string());
+                if let Some(ui) = vt_ui_weak.upgrade() {
+                    ui.set_voice_typing_state(slint::SharedString::from(label));
+                }
+            },
+        );
+        t
+    };
+
     ui.run()?;
-    // Keep _dl_timer alive until here (timer drops → stops).
+    // Keep timers alive until here (timer drops → stops).
     drop(_dl_timer);
+    drop(_vt_timer);
 
     // Finalize the session row before tearing down the runtime so end_ts/duration
     // get written. This is best-effort — if the DB lock can't be acquired (e.g.
@@ -871,6 +1236,14 @@ fn init_audio(
                     if let Ok(mut g) = detail_cell.lock() {
                         *g = Some(detail.clone());
                     }
+                    // Phase 20: persist last-viewed session for startup restore.
+                    if let Err(e) = i18n::save_last_session(sid) {
+                        tracing::warn!(
+                            session_id = sid,
+                            error = %e,
+                            "session-detail: last_session.txt write failed"
+                        );
+                    }
                     if let Some(ui) = ui_weak_detail.upgrade() {
                         ui.set_detail_session_id(detail.session.id as i32);
                         ui.set_detail_started_at(
@@ -1165,6 +1538,9 @@ fn init_audio(
                             original_text: l.original_text.clone().into(),
                             duration_ms: l.duration_ms,
                             translation_done: l.translation_done,
+                            speaker: slint::SharedString::from(
+                                l.speaker.as_deref().unwrap_or("")
+                            ),
                         })
                         .collect();
                     transcript_model_for_timer.set_vec(new_rows);
@@ -1726,6 +2102,37 @@ fn write_provider_mode(mode: ProviderMode) -> std::io::Result<()> {
     std::fs::write(&path, mode.id())
 }
 
+// ---- Diarization toggle persistence (Phase 18) ----------------------------
+
+/// Path: `%APPDATA%\Vong\Vong AI Recorder\config\diarization.txt`
+/// Content: single line `enabled` or `disabled`.
+fn diarization_config_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("com", "Vong", "Vong AI Recorder")
+        .map(|d| d.config_dir().join("diarization.txt"))
+}
+
+/// Load diarization enabled flag. Returns `false` (off) on any read/parse error
+/// to ensure backward compat — users must explicitly opt in.
+pub(crate) fn read_diarization_enabled() -> bool {
+    if let Some(path) = diarization_config_path() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            return content.trim() == "enabled";
+        }
+    }
+    false
+}
+
+/// Persist the diarization toggle. Creates the config dir if absent.
+pub(crate) fn write_diarization_enabled(enabled: bool) -> std::io::Result<()> {
+    let Some(path) = diarization_config_path() else {
+        return Err(std::io::Error::other("ProjectDirs unavailable"));
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, if enabled { "enabled" } else { "disabled" })
+}
+
 // ---- Audio source picker (Phase 2-W: input + output loopback) -------------
 
 /// Persisted-source config path under `%APPDATA%\Vong\Vong AI Recorder\config\source.txt`.
@@ -1936,6 +2343,13 @@ fn wire_provider_hot_swap_callback(
                             ui.set_current_provider_mode(
                                 provider_label(new_mode).into(),
                             );
+                            // Phase 12 polish: re-populate Whisper model picker when
+                            // swapping to LocalWhisper so the list is always fresh.
+                            if new_mode == ProviderMode::LocalWhisper {
+                                let models_dir = resolve_models_dir();
+                                let entries = scan_models(&models_dir);
+                                push_whisper_models_to_ui(&ui, &entries, "");
+                            }
                         }
                     });
                 }
@@ -2455,6 +2869,7 @@ pub(crate) fn spawn_event_consumer_handle(
                     language: _,
                     original_text,
                     original_language,
+                    speaker,
                     end,
                     ..
                 } => {
@@ -2476,6 +2891,7 @@ pub(crate) fn spawn_event_consumer_handle(
                         }
                     }
 
+                    let speaker_for_upsert = speaker.clone();
                     upsert_line_for_seq(
                         &state,
                         seq,
@@ -2486,6 +2902,11 @@ pub(crate) fn spawn_event_consumer_handle(
                                 .clone()
                                 .unwrap_or_else(|| "?".into());
                             line.duration_ms = end.as_millis() as i32;
+                            // Only update speaker when a non-None tag arrives —
+                            // don't clobber a speaker tag set by a previous partial.
+                            if speaker_for_upsert.is_some() {
+                                line.speaker = speaker_for_upsert.clone();
+                            }
                         },
                     );
                 }
@@ -2524,13 +2945,23 @@ pub(crate) fn spawn_event_consumer_handle(
                         } else {
                             Some(target_lang.as_str())
                         };
+                        // Look up the speaker label stored on the transcript line
+                        // (set by the preceding Final event for this seq).
+                        let speaker_label = state
+                            .transcript_stream
+                            .lock()
+                            .ok()
+                            .and_then(|s| {
+                                s.iter().rev().find(|l| l.seq == seq as i32)
+                                    .and_then(|l| l.speaker.clone())
+                            });
                         persist_segment(
                             ctx,
                             seq,
-                            Duration::ZERO,
-                            Duration::ZERO,
+                            (Duration::ZERO, Duration::ZERO),
                             &text,
                             lang_opt,
+                            speaker_label,
                             &state,
                         );
                     }
@@ -2586,6 +3017,7 @@ fn upsert_line_for_seq(
                 original_text: String::new(),
                 duration_ms: initial_duration_ms,
                 translation_done: false,
+                speaker: None,
             };
             f(&mut line);
             s.push(line);
@@ -2600,21 +3032,26 @@ fn upsert_line_for_seq(
 
 /// Insert a `transcript_segments` row. Logs + counts on success; logs warn on
 /// failure (best-effort persistence — never crash the pipeline on DB error).
+///
+/// `speaker_label`: diarization tag from the STT provider (e.g. "1" for Soniox).
+/// `None` when diarization is disabled or the provider doesn't support it.
+/// Only the tag value is safe to log as a structured field — never the text.
 fn persist_segment(
     ctx: &SessionContext,
     seq: u64,
-    start: Duration,
-    end: Duration,
+    span: (Duration, Duration),   // (start, end) — bundled to stay under 7-arg limit
     text: &str,
     language: Option<&str>,
+    speaker_label: Option<String>,
     state: &PipelineState,
 ) {
+    let (start, end) = span;
     let row = NewSegment {
         session_id: ctx.session_id,
         seq: seq as i64,
         start_ms: start.as_millis() as i64,
         end_ms: end.as_millis() as i64,
-        speaker_label: None,
+        speaker_label,
         text: text.to_string(),
         language: language.map(|s| s.to_string()),
         confidence: None,
@@ -2628,6 +3065,7 @@ fn persist_segment(
                     segment_id = id,
                     session_id = ctx.session_id,
                     seq,
+                    speaker = row.speaker_label.as_deref().unwrap_or("none"),
                     "segment persisted"
                 );
             }
@@ -2641,6 +3079,75 @@ fn persist_segment(
 
 /// Return the models directory where Whisper GGML files are stored.
 ///
+// ── Phase 20: i18n helpers ────────────────────────────────────────────────────
+//
+// Build a `LocaleStrings` Slint struct from a translation lookup for the
+// given locale and push it to the UI.
+fn push_locale_strings(ui: &AppWindow, locale: i18n::Locale) {
+    let tr = i18n::Translations::new(locale);
+    ui.set_locale_strings(LocaleStrings {
+        tap_to_record: tr.t("tap_to_record").into(),
+        recording_active: tr.t("recording_active").into(),
+        transcript_original: tr.t("transcript_original").into(),
+        transcript_translated: tr.t("transcript_translated").into(),
+        waiting_speech: tr.t("waiting_speech").into(),
+        col_hint_original: tr.t("col_hint_original").into(),
+        col_hint_translated: tr.t("col_hint_translated").into(),
+        silence_placeholder: tr.t("silence_placeholder").into(),
+        no_translation: tr.t("no_translation").into(),
+        translating: tr.t("translating").into(),
+        history_title: tr.t("history_title").into(),
+        history_empty: tr.t("history_empty").into(),
+        search_placeholder: tr.t("search_placeholder").into(),
+        export_btn: tr.t("export_btn").into(),
+        tab_system: tr.t("tab_system").into(),
+        tab_voice_typing: tr.t("tab_voice_typing").into(),
+        tab_recording: tr.t("tab_recording").into(),
+        tab_language: tr.t("tab_language").into(),
+        tab_dictionary: tr.t("tab_dictionary").into(),
+        tab_notification: tr.t("tab_notification").into(),
+        settings_title: tr.t("settings_title").into(),
+        section_system: tr.t("section_system").into(),
+        section_system_sub: tr.t("section_system_sub").into(),
+        section_recording: tr.t("section_recording").into(),
+        section_recording_sub: tr.t("section_recording_sub").into(),
+        section_language: tr.t("section_language").into(),
+        section_language_sub: tr.t("section_language_sub").into(),
+        section_voice_typing: tr.t("section_voice_typing").into(),
+        section_voice_typing_sub: tr.t("section_voice_typing_sub").into(),
+        stt_engine: tr.t("stt_engine").into(),
+        audio_source: tr.t("audio_source").into(),
+        crash_reporting: tr.t("crash_reporting").into(),
+        auto_update: tr.t("auto_update").into(),
+        auto_summary: tr.t("auto_summary").into(),
+        diarization: tr.t("diarization").into(),
+        whisper_model: tr.t("whisper_model").into(),
+        dictionary_title: tr.t("dictionary_title").into(),
+        language_card: tr.t("language_card").into(),
+        interface_language: tr.t("interface_language").into(),
+        locale_vi: tr.t("locale_vi").into(),
+        locale_en: tr.t("locale_en").into(),
+        session_summary: tr.t("session_summary").into(),
+        session_content: tr.t("session_content").into(),
+        session_no_segments: tr.t("session_no_segments").into(),
+        summary_idle: tr.t("summary_idle").into(),
+        summary_computing: tr.t("summary_computing").into(),
+        summary_needs_key: tr.t("summary_needs_key").into(),
+        btn_regenerate: tr.t("btn_regenerate").into(),
+        btn_copy: tr.t("btn_copy").into(),
+        placeholder_coming: tr.t("placeholder_coming").into(),
+        restart_to_apply: tr.t("restart_to_apply").into(),
+        toggle_on: tr.t("toggle_on").into(),
+        toggle_off: tr.t("toggle_off").into(),
+        btn_save: tr.t("btn_save").into(),
+        btn_check_now: tr.t("btn_check_now").into(),
+        btn_add: tr.t("btn_add").into(),
+        api_key_label: tr.t("api_key_label").into(),
+    });
+}
+
+// ── end Phase 20 ─────────────────────────────────────────────────────────────
+
 /// Matches case 3 of `WhisperLocalProvider::resolve_default_model_path()`:
 /// `%LOCALAPPDATA%\Vong\Vong AI Recorder\data\models\`
 fn resolve_models_dir() -> PathBuf {
@@ -2861,6 +3368,7 @@ fn wire_recording_settings_callbacks(
                             version: 1,
                             vad: p,
                             whisper_model_path: model_path,
+                            ..recording_config::RecordingConfig::default()
                         };
                         if let Err(e) = recording_config::save(&cfg) {
                             tracing::warn!(error = %e, "recording.json VAD save failed");
@@ -2999,6 +3507,7 @@ fn wire_recording_settings_callbacks(
                             version: 1,
                             vad: vad_params,
                             whisper_model_path: Some(target_path),
+                            ..recording_config::RecordingConfig::default()
                         };
                         if let Err(e) = recording_config::save(&cfg) {
                             tracing::warn!(error = %e, "recording.json model path save failed");
@@ -3076,6 +3585,7 @@ fn wire_vad_slider_callbacks_only(
                             version: 1,
                             vad: p,
                             whisper_model_path: None,
+                            ..recording_config::RecordingConfig::default()
                         };
                         if let Err(e) = recording_config::save(&cfg) {
                             tracing::warn!(error = %e, "recording.json VAD save failed");

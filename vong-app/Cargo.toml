@@ -64,6 +64,19 @@ muda = "0.19"           # Menu items used by tray-icon
 # Phase 11: clipboard for "Copy summary" button in SessionDetail view.
 arboard = "3"
 
+# Phase 17: Voice Typing — text injection into focused app via OS synthetic input.
+# SendInput (Windows), CGEventPost (macOS), XTest/XSendEvent (Linux).
+# Windows only at runtime (injection path gated on cfg(target_os = "windows")).
+# Compiles cross-platform; macOS/Linux injection is a no-op stub in this phase.
+enigo = "0.3"
+# uuid needed to construct Utterance for the one-shot voice-typing STT call.
+uuid = { version = "1", features = ["v4"] }
+
+# Phase 19: auto-update check — same reqwest features as vong-transcribe to share a single copy.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
+semver = "1"
+webbrowser = "1"
+
 # Future phases:
 # vong-ui = { workspace = true }
 
@@ -78,6 +91,10 @@ eula = false
 
 [dev-dependencies]
 tempfile = "3"        # Temporary directories for dictionary_test.rs file I/O tests
+# Phase 19 integration tests — semver compare + async fetch-failure test.
+semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [build-dependencies]
 slint-build = "1.7"

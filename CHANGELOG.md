@@ -5,13 +5,15 @@ versioning follows [SemVer](https://semver.org/) (pre-1.0 = breaking changes pos
 
 ## [Unreleased]
 
-Sprint 1 + 2 + 3 — production v1.0-beta.1 readiness, then power-user polish,
-then final UX integration. Sprint 1 (6 phases): MSI installer, in-app model
-downloader, first-run wizard, landing page, R2 release pipeline, beta QA
-docs. Sprint 2 (4 phases): Recording settings sliders, custom Dictionary,
-opt-in Sentry crash reporting, LLM session summaries (OpenAI gpt-4o-mini).
-Sprint 3 (3 phases): HistoryCard + SessionDetail view + Summary preview,
-Toast + Dialog Slint infrastructure, Provider hot-swap (no restart needed).
+Sprint 1-4 — production v1.0-beta.1 readiness, then power-user polish,
+then final UX integration, then beta-launch enablers. Sprint 1 (6 phases):
+MSI installer, in-app model downloader, first-run wizard, landing page, R2
+release pipeline, beta QA docs. Sprint 2 (4 phases): Recording sliders,
+Dictionary, Sentry crash reporting, LLM summaries. Sprint 3 (3 phases):
+HistoryCard + SessionDetail, Toast + Dialog infra, Provider hot-swap.
+Sprint 4 (4 phases): Diarization (Soniox speaker labels), Auto-update
+checker, Voice Typing (Ctrl+Shift+V global hotkey + text injection),
+i18n EN/VI toggle + Sprint 3 carry-over polishes.
 
 ### Added
 
@@ -137,6 +139,67 @@ Toast + Dialog Slint infrastructure, Provider hot-swap (no restart needed).
   persist failure. `HotswapError { Cancelled, JoinTimeout, SpawnFailed,
   PersistFailed }` each maps to Vietnamese toast. Restart banner removed
   from `ProviderCard`. 6 new tests.
+- **Phase 18 — Diarization (Soniox speaker labels)**
+  (`vong-transcribe/src/{soniox,soniox_protocol,events,traits}.rs`,
+  `vong-app/src/main.rs`). Soniox `enable_speaker_diarization` config
+  flag gated on `StreamOpts.enable_diarization`; response token `speaker`
+  Option<String> parsed and threaded into `TranscriptEvent::{Final,
+  Partial}.speaker`. Whisper local + OpenAI Realtime emit `None`
+  (Whisper diarization deferred — heavy). Settings → System
+  `DiarizationCard` toggle 'Nhận diện người nói (chỉ Soniox)', default OFF,
+  persists to `diarization.txt`. Transcript view shows '🎤 Người N' chip
+  before each speaker's segment (in both main view + SessionDetail). DB
+  `transcript_segments.speaker_label` column (Phase 6) now written through.
+  Privacy: only speaker tag (e.g. '1') logged, never segment content.
+  10 new tests.
+- **Phase 19 — Auto-update mechanism** (`vong-app/src/auto_update.rs`,
+  `tests/release_check_test.rs`). At app startup (30s delay), spawn
+  low-priority task that HTTP-GETs `<R2_PUBLIC_BASE>/latest/version.txt`,
+  parses semver, compares against `env!("CARGO_PKG_VERSION")`. On newer
+  remote: pushes Info toast 'Có bản cập nhật mới <version> — vong.app để
+  tải'. Throttle: once per 4 hours per process via `AtomicI64` last-check
+  epoch. Settings → System `AutoUpdateCard` with toggle (default ON) +
+  'Check now' button. Hardcoded `R2_PUBLIC_BASE = "https://dl.vong.app"`
+  overridable via `VONG_UPDATE_BASE` env var (test only). Privacy: zero
+  telemetry payload — fetch IS the entire transmission. NO in-app self-
+  install — clicking toast opens browser to landing. Squirrel / WebView2
+  full auto-update deferred. Persists `auto_update.txt` consent. 14 new
+  tests.
+- **Phase 17 — Voice Typing (Windows global hotkey + text injection)**
+  (`vong-app/src/voice_typing.rs`). KILLER feature: Ctrl+Shift+V anywhere
+  → one-shot mic capture (max 10s, auto-stop on 1.5s VAD silence) →
+  Whisper local fast inference → `enigo` SendInput types the text into
+  the currently focused Windows app. State machine `Idle → Listening →
+  Transcribing → Injecting → Idle` mirrored to UI via 30 Hz timer.
+  Settings → Voice Typing tab fully wired: enable toggle (default OFF —
+  text injection requires explicit consent), max-duration slider (1-30s),
+  language picker (5 langs), privacy disclosure 'Voice Typing chỉ dùng
+  Whisper local — âm thanh không bao giờ rời máy bạn'. Floating overlay
+  top-center shows current state when active. Conflict guard: if main
+  pipeline `is_recording` → Toast 'Đang ghi phiên chính — dừng phiên
+  trước'. Second-press cancels active session. Text sanitizer strips C0
+  control chars (`\0`, `\x1b`, `\b`) before injection; newlines + tabs
+  preserved. macOS injection path is `#[cfg(target_os = "windows")]` —
+  toggle visible but greyed out (Sprint 5 Accessibility API). Persists
+  inside `recording.json` as nested `voice_typing` config. 16 new tests.
+- **Phase 20 — i18n EN/VI toggle + Sprint 3 polishes** (`vong-app/src/i18n.rs`).
+  Lean Rust-side translation: 53-key compile-time `TRANSLATIONS` table
+  (VI default + EN), `Translations::t(key)` returns key itself on miss
+  (never panics). `LocaleStrings` Slint struct with 62 fields mirrors the
+  translated strings to UI on locale change. Settings → System
+  `LanguageCard` at TOP of tab: radio Tiếng Việt / English. Locale
+  toggle instant — no restart. Persists to `locale.txt`. Coverage: main
+  view (mic button, transcript columns, History), Settings tab sidebar
+  labels, section titles per tab. Card body paragraphs + wizard +
+  HotswapError messages remain Vietnamese-only — full pass deferred to
+  Sprint 5. PLUS two carry-over polishes wired here:
+  - **Last-viewed session persist** (Phase 11 carry-over): write
+    `last_session.txt` on history-row click; on app start, if file exists
+    + session row still in DB → restore `current-view = "session-detail"`.
+  - **Model picker re-populate** (Phase 12 carry-over): after
+    `pipeline.swap_provider` succeeds and target is LocalWhisper,
+    `scan_models()` + push fresh list to Slint.
+  23 new tests.
 
 ### Changed
 
@@ -190,6 +253,27 @@ Toast + Dialog Slint infrastructure, Provider hot-swap (no restart needed).
   HistoryCard switched from text concatenation to VecModel rows.
 - **`vong-app/Cargo.toml`**: added `arboard = "3"` for cross-platform
   clipboard (Copy summary in SessionDetail).
+- **`TranscriptEvent::{Final, Partial}`**: added `speaker: Option<String>`
+  field. Whisper + OpenAI always emit `None`; Soniox emits Some("1")
+  etc. when diarization enabled.
+- **`vong-app/src/main.rs::TranscriptStreamLine`**: added `speaker:
+  Option<String>` field; both Final + Translation handlers thread it
+  through to the storage `persist_segment(..., speaker_label)` call.
+- **`vong-app/src/recording_config.rs::RecordingConfig`**: added
+  `voice_typing: VoiceTypingConfig { enabled, hotkey, max_duration_secs,
+  language }` nested struct. Single `recording.json` truth for both VAD
+  sliders (Phase 7) and Voice Typing config (Phase 17).
+- **`vong-app/Cargo.toml`**: added `enigo = "0.3"` (text injection via
+  Windows SendInput), `semver = "1"` (auto-update version compare),
+  `webbrowser = "1"` (open landing URL on update toast click), `uuid =
+  "1"` (Voice Typing session ids).
+- **Test file renamed**: `tests/auto_update_test.rs` → `tests/release_check_test.rs`
+  to avoid Windows UAC heuristic that escalates any `*update*.exe` as an
+  installer requiring elevation. Test content unchanged.
+- **`AppWindow`**: added `locale: string` + `locale-strings: LocaleStrings`
+  properties + `locale-changed(new-locale)` callback. The `LocaleStrings`
+  struct has 62 string fields covering main view + Settings tab labels +
+  SessionDetail.
 
 ### Fixed
 

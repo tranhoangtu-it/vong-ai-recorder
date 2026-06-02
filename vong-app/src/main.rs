@@ -17,14 +17,21 @@
 )]
 
 mod autosummary;
+mod dialog;
 mod dictionary;
 mod log_init;
+mod pipeline;
 mod recording_config;
 mod sentry_init;
+mod session_detail;
 mod summary_runner;
+mod toast;
 mod tray;
 mod wizard;
 
+use dialog::DialogQueue;
+use pipeline::PipelineHandle;
+use toast::{ToastQueue, ToastSeverity};
 use cpal::traits::DeviceTrait;
 use rtrb::RingBuffer;
 use std::cell::RefCell;
@@ -40,14 +47,13 @@ use vong_audio::{
 };
 use summary_runner::SummaryRunner;
 use vong_storage::{
-    default_db_path, export_markdown, finalize_session, insert_segment, insert_session,
-    list_recent_sessions, open_default, search_transcripts, Connection, NewSegment, NewSession,
-    SearchHit, Session,
+    default_db_path, export_markdown, fetch_summaries_for_sessions, finalize_session,
+    insert_segment, insert_session, list_recent_sessions, open_default, search_transcripts,
+    Connection, NewSegment, NewSession, SearchHit,
 };
 use vong_transcribe::{
     model_dl, ApiKey, DictEntry, DlError, DownloadProgress as DlProgress, DownloadState,
-    LiveConfigHandle, OpenAIRealtimeProvider, ProviderMode, SonioxProvider, StreamOpts,
-    StreamingTranscriber, TargetMode, TranscriptEvent, WhisperLocalProvider,
+    LiveConfigHandle, ProviderMode, TargetMode, TranscriptEvent, WhisperLocalProvider,
 };
 
 slint::include_modules!();
@@ -64,6 +70,12 @@ struct AudioBundle {
     session: Option<SessionContext>,
     /// Shared summary runner — used by UI timer and shutdown finalizer.
     summary_runner: Arc<SummaryRunner>,
+    /// Phase 13: toast queue — shared with timer + callbacks.
+    _toast_queue: ToastQueue,
+    /// Phase 13: dialog queue — shared with timer + callbacks.
+    _dialog_queue: DialogQueue,
+    /// Phase 12: provider pipeline lifecycle handle — supports hot-swap.
+    _pipeline: Arc<PipelineHandle>,
 }
 
 /// A live capture chain: the cpal stream (owns its own RT thread) plus the
@@ -150,6 +162,9 @@ struct PipelineState {
     model_switch_status: Mutex<String>,
     /// Label of the currently active Whisper model (e.g. "ggml-base.bin").
     active_whisper_model: Mutex<String>,
+    /// Phase 13: last session_id for which a summary-error toast was pushed.
+    /// Prevents spamming a toast on every 30 Hz tick when summary stays in error state.
+    last_summary_error_toast_session: AtomicU64,
 }
 
 /// Local mirror of Slint's `TranscriptLine` struct for in-Rust storage.
@@ -247,7 +262,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_started_at = std::time::Instant::now();
 
-    let audio = match init_audio(&ui, app_started_at) {
+    // Phase 13: app-wide toast + dialog queues, created before init_audio so
+    // they can be shared into the audio bundle, dl_timer, and top-level callbacks.
+    let app_toast_queue = ToastQueue::new();
+    let app_dialog_queue = DialogQueue::new();
+
+    let audio = match init_audio(&ui, app_started_at, app_toast_queue.clone(), app_dialog_queue.clone()) {
         Ok(bundle) => Some(bundle),
         Err(e) => {
             let msg = format!("Microphone unavailable — {e}");
@@ -284,9 +304,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pushes `dl_progress` into `ui.download-progress` at 30 Hz (same cadence as
     // the audio-pipeline timer in init_audio). Also checks whether a model is
     // present on disk for the wizard step-4 "Next" enable gate.
+    let dl_toast_queue = app_toast_queue.clone();
+    let mut dl_last_error_state = false; // track edge: idle→error to toast once
+
     let ui_weak_dl = ui.as_weak();
     let dl_progress_timer = dl_progress.clone();
     let models_dir_timer = models_dir.clone();
+    let dl_toast_queue_timer = dl_toast_queue.clone(); // same arc as app_toast_queue
     let _dl_timer = {
         let t = slint::Timer::default();
         t.start(
@@ -297,6 +321,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Mirror download progress struct into Slint property.
                 if let Ok(p) = dl_progress_timer.lock() {
+                    // Phase 13: push error toast on transition to error state (once).
+                    let is_error = p.state == DownloadState::Error;
+                    if is_error && !dl_last_error_state {
+                        dl_toast_queue_timer.push(
+                            "Tải mô hình thất bại — kiểm tra kết nối mạng",
+                            ToastSeverity::Error,
+                        );
+                        // Mirror toast stack into Slint from here so the dl_timer
+                        // toasts are visible (the main 30 Hz timer handles its own queue).
+                        dl_toast_queue_timer.prune_expired();
+                        let snap = dl_toast_queue_timer.snapshot();
+                        // Merge with existing toast-stack (append only — avoid clobber).
+                        // For simplicity we only push dl_timer toasts via the same Slint prop
+                        // when dl_toast_queue has entries. The main timer will overwrite on
+                        // next tick if both queues have entries — acceptable since download
+                        // errors are transient and the main timer runs at the same 30 Hz.
+                        if !snap.is_empty() {
+                            let slint_toasts: Vec<ToastEntry> = snap
+                                .iter()
+                                .map(|t| ToastEntry {
+                                    id: t.id.min(i32::MAX as u64) as i32,
+                                    message: slint::SharedString::from(t.message.as_str()),
+                                    severity: slint::SharedString::from(t.severity.as_str()),
+                                    expires_at_ms: t.expires_at_ms.min(i32::MAX as u64) as i32,
+                                })
+                                .collect();
+                            let toast_model = slint::VecModel::from(slint_toasts);
+                            ui.set_toast_stack(slint::ModelRc::from(
+                                std::rc::Rc::new(toast_model),
+                            ));
+                        }
+                    }
+                    dl_last_error_state = is_error;
+
                     ui.set_download_progress(DownloadProgress {
                         state: slint::SharedString::from(p.state.as_str()),
                         bytes_downloaded: p.bytes.min(i32::MAX as u64) as i32,
@@ -338,6 +396,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // takes effect on the next app launch.
     {
         let ui_weak_sentry = ui.as_weak();
+        let tq_sentry = app_toast_queue.clone();
         ui.on_crash_reporting_toggled(move |enabled| {
             let state = if enabled {
                 sentry_init::ConsentState::Enabled
@@ -346,6 +405,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             if let Err(e) = sentry_init::save_consent(state) {
                 tracing::warn!(error = ?e, "crash reporting consent save failed");
+                // Phase 13: surface config save failure as a toast.
+                tq_sentry.push("Lưu cấu hình báo lỗi thất bại", ToastSeverity::Error);
             } else {
                 tracing::info!(
                     sentry_consent = enabled,
@@ -422,7 +483,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn init_audio(
     ui: &AppWindow,
-    app_started_at: std::time::Instant,
+    _app_started_at: std::time::Instant,
+    toast_queue: ToastQueue,
+    dialog_queue: DialogQueue,
 ) -> Result<AudioBundle, AudioError> {
     // Shared sinks used by every audio source we ever start.
     let peak = PeakMeter::new();
@@ -452,12 +515,10 @@ fn init_audio(
     let active_source: Rc<RefCell<Option<AudioSource>>> =
         Rc::new(RefCell::new(Some(initial_source)));
 
-    // VAD FSM emits to an INTERNAL channel. A relay task forwards into the
-    // external channel that Whisper actually consumes — gated by the
-    // `is_recording` toggle so audio doesn't reach the model when the user
-    // hasn't clicked the mic button.
+    // VAD FSM emits to an INTERNAL channel. A relay task forwards to the
+    // active provider via PipelineHandle — gated by the `is_recording` toggle
+    // so audio doesn't reach the model when the user hasn't clicked the mic button.
     let (utt_internal_tx, mut utt_internal_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
-    let (utt_external_tx, utt_external_rx) = tokio::sync::mpsc::channel::<Utterance>(32);
 
     // Load recording config (VAD sliders + last-used Whisper model path).
     // Missing or corrupt file → silently use defaults.
@@ -492,16 +553,26 @@ fn init_audio(
 
     let state = Arc::new(PipelineState::default());
 
-    // Relay: gate by `is_recording`. Drops partials too — we explicitly
-    // DON'T want stale partials from the moment recording flips on; the
-    // user expects fresh utterances only.
+    // Phase 12: PipelineHandle owns the streaming provider task and supports
+    // hot-swap via swap_provider(). Created here with a placeholder live_config;
+    // the actual config is wired inside the provider match block below.
+    // `Arc` because the relay task, the provider swap callback, and AudioBundle
+    // all need to share the handle.
+    let pipeline_handle = Arc::new(PipelineHandle::new(
+        Arc::new(Mutex::new(vong_transcribe::LiveSttConfig::default())),
+        runtime.handle().clone(),
+        state.clone(),
+    ));
+
+    // Relay: gate by `is_recording`. Forwards utterances to the active provider
+    // via PipelineHandle::send_utterance so hot-swap is transparent.
     let state_for_relay = state.clone();
+    let pipeline_for_relay = pipeline_handle.clone();
     runtime.spawn(async move {
         while let Some(utt) = utt_internal_rx.recv().await {
             if state_for_relay.is_recording.load(Ordering::Acquire) {
-                if utt_external_tx.send(utt).await.is_err() {
-                    tracing::warn!("relay: external utt channel closed");
-                    break;
+                if !pipeline_for_relay.send_utterance(utt).await {
+                    tracing::warn!("relay: provider channel closed or no active provider");
                 }
             } else {
                 tracing::trace!(
@@ -512,9 +583,6 @@ fn init_audio(
             }
         }
     });
-
-    // Rename for clarity — downstream code consumed `utt_rx`.
-    let utt_rx = utt_external_rx;
 
     // Phase 10: SummaryRunner created early so it can be captured by on_record_toggled.
     // `shared_session` is populated after init_storage — both closures share the Arc.
@@ -561,14 +629,12 @@ fn init_audio(
         }
     }
 
-    // Decide which STT engine to drive the pipeline. Read at startup; the UI
-    // picker writes the config but a restart is required to swap providers.
+    // Decide which STT engine to drive the pipeline. Phase 12: hot-swap is now
+    // supported — changing provider in Settings calls swap_provider, no restart.
     let provider_mode = read_provider_mode();
     tracing::info!(provider = %provider_mode.id(), "STT provider mode selected");
     ui.set_current_provider_mode(provider_label(provider_mode).into());
     ui.set_provider_is_cloud(provider_mode != ProviderMode::LocalWhisper);
-    // Short label for the footer status indicator — strip the emoji prefix
-    // off the picker label for a tighter footer.
     let short = match provider_mode {
         ProviderMode::LocalWhisper => "Whisper local",
         ProviderMode::SonioxCloud => "Soniox",
@@ -576,81 +642,17 @@ fn init_audio(
     };
     ui.set_provider_status_label(short.into());
 
+    // Wire UI pickers + startup model scan based on the initial provider mode.
+    // This block handles UI-only setup; the actual task is spawned via PipelineHandle.
     match provider_mode {
-        ProviderMode::SonioxCloud => {
-            // Wire VAD sliders even for cloud providers (VAD is always local).
+        ProviderMode::SonioxCloud | ProviderMode::OpenAIRealtime => {
+            // VAD sliders are always local regardless of STT provider.
             wire_vad_slider_callbacks_only(ui, live_vad.clone(), runtime.handle().clone());
-            match ApiKey::load("soniox") {
-                Ok(key) => {
-                    tracing::info!("Soniox API key loaded from keychain — using SonioxProvider");
-                    state
-                        .whisper_loaded
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    // Seed dictionary terms from startup-loaded config.
-                    let soniox_terms = {
-                        let guard = dict_file_handle.lock().expect("dict poisoned");
-                        vong_transcribe::build_soniox_terms(&guard.entries)
-                    };
-                    let provider = Arc::new(
-                        SonioxProvider::new(key).with_dictionary_terms(soniox_terms),
-                    );
-                    spawn_soniox_pipeline(
-                        &runtime,
-                        provider,
-                        utt_rx,
-                        state.clone(),
-                        session.as_ref().map(SessionContext::clone_for_task),
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "Soniox selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
-                    );
-                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
-                }
-            }
-        }
-        ProviderMode::OpenAIRealtime => {
-            // Wire VAD sliders even for cloud providers (VAD is always local).
-            wire_vad_slider_callbacks_only(ui, live_vad.clone(), runtime.handle().clone());
-            match ApiKey::load("openai-realtime") {
-                Ok(key) => {
-                    tracing::info!(
-                        "OpenAI API key loaded from keychain — using OpenAIRealtimeProvider"
-                    );
-                    state
-                        .whisper_loaded
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    // Seed dictionary instructions from startup-loaded config.
-                    let openai_instructions = {
-                        let guard = dict_file_handle.lock().expect("dict poisoned");
-                        vong_transcribe::build_openai_instructions(&guard.entries)
-                    };
-                    let provider = Arc::new(
-                        OpenAIRealtimeProvider::new(key)
-                            .with_dictionary_instructions(openai_instructions),
-                    );
-                    spawn_openai_pipeline(
-                        &runtime,
-                        provider,
-                        utt_rx,
-                        state.clone(),
-                        session.as_ref().map(SessionContext::clone_for_task),
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e,
-                        "OpenAI Realtime selected but no API key in keychain — falling back to utterance counter. Set the key via the UI."
-                    );
-                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
-                }
-            }
         }
         ProviderMode::LocalWhisper => {
-            // Determine model path: prefer the one saved in recording.json,
-            // falling back to the standard search ladder.
+            // For Whisper local, try to load the model for UI wiring purposes
+            // (language pickers, model picker, warmup). The actual spawn is via
+            // PipelineHandle::start below — which also handles the load.
             let model_path = rec_cfg
                 .whisper_model_path
                 .as_ref()
@@ -658,36 +660,15 @@ fn init_audio(
                 .cloned()
                 .unwrap_or_else(WhisperLocalProvider::resolve_default_model_path);
 
-            let whisper_result = WhisperLocalProvider::new(&model_path);
-            match whisper_result {
+            match WhisperLocalProvider::new(&model_path) {
                 Ok(provider) => {
-                    state
-                        .whisper_loaded
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!(
-                        model = %model_path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        "Whisper local model loaded"
-                    );
-
-                    // Share provider via Arc so a warmup task can run alongside the
-                    // streaming pipeline. The first inference call on the Vulkan
-                    // backend pays a ~6 s shader-pipeline init; we eat that cost
-                    // here on a blocking pool thread so the first real utterance
-                    // hits a warm pipeline at ~0.15 s.
                     let provider = Arc::new(provider);
 
-                    // Store the currently-active model label in shared state for UI.
-                    if let Ok(mut g) = state.active_whisper_model.lock() {
-                        *g = provider.model_label();
-                    }
-
-                    // Grab the live STT config handle so the UI pickers can mutate it.
+                    // Wire the shared live config into PipelineHandle so language
+                    // pickers + dictionary edits mutate the same handle the provider uses.
+                    // Replace the placeholder config with the provider's actual one.
                     let live_config = provider.live_config();
-
-                    // Seed dictionary into the live config so the very first
-                    // utterance benefits from any entries saved from a previous session.
+                    // Seed dictionary before wiring.
                     {
                         let guard = dict_file_handle.lock().expect("dict poisoned");
                         if let Ok(mut cfg) = live_config.lock() {
@@ -695,10 +676,11 @@ fn init_audio(
                             cfg.rebuild_dictionary_caches();
                         }
                     }
+                    // Phase 12: inject the provider's live config into PipelineHandle so
+                    // swap_provider passes the same handle to the new provider after swap.
+                    pipeline_handle.set_live_config(live_config.clone());
 
                     wire_language_picker_callbacks(ui, live_config.clone());
-
-                    // Wire VAD slider callbacks + debounced persist.
                     wire_recording_settings_callbacks(
                         ui,
                         live_vad.clone(),
@@ -706,12 +688,13 @@ fn init_audio(
                         state.clone(),
                         rec_cfg.whisper_model_path.clone(),
                         runtime.handle().clone(),
+                        toast_queue.clone(),
                     );
 
-                    // Populate the model list for the picker (scan both model dirs).
                     let model_entries = scan_models(&resolve_models_dir());
                     push_whisper_models_to_ui(ui, &model_entries, &provider.model_label());
 
+                    // Warmup — pays the GPU shader-init cost upfront.
                     let warmup_provider = provider.clone();
                     state
                         .whisper_warming_up
@@ -725,24 +708,12 @@ fn init_audio(
                             .whisper_warming_up
                             .store(false, std::sync::atomic::Ordering::Relaxed);
                     });
-
-                    spawn_whisper_pipeline(
-                        &runtime,
-                        provider,
-                        utt_rx,
-                        state.clone(),
-                        session.as_ref().map(SessionContext::clone_for_task),
-                    );
                 }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        model = %model_path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        "Whisper unavailable — falling back to utterance counter only"
+                        "Whisper unavailable at startup — falling back via PipelineHandle"
                     );
-                    // Still wire VAD sliders (without model picker wiring since no provider).
                     wire_vad_slider_callbacks_only(
                         ui,
                         live_vad.clone(),
@@ -750,10 +721,36 @@ fn init_audio(
                     );
                     let model_entries = scan_models(&resolve_models_dir());
                     push_whisper_models_to_ui(ui, &model_entries, "");
-                    spawn_utterance_counter(&runtime, utt_rx, state.clone());
                 }
             }
         }
+    }
+
+    // Language pickers for cloud providers — wire against the shared live config
+    // held in pipeline_handle so source_language / target_mode survive a swap.
+    if provider_mode != ProviderMode::LocalWhisper {
+        wire_language_picker_callbacks(ui, pipeline_handle.live_stt_config());
+    }
+
+    // Spawn the initial provider task via PipelineHandle::start.
+    // The event_consumer_fn closure connects the new event channel to PipelineState
+    // + DB persistence using the runtime handle (not a borrow).
+    {
+        let dict_entries = {
+            let guard = dict_file_handle.lock().expect("dict poisoned");
+            guard.entries.clone()
+        };
+        let session_for_start = session.as_ref().map(SessionContext::clone_for_task);
+        let runtime_handle_for_ec = runtime.handle().clone();
+        pipeline_handle.start(
+            provider_mode,
+            dict_entries,
+            session_for_start,
+            &rec_cfg,
+            move |event_rx, s, sess| {
+                spawn_event_consumer_handle(&runtime_handle_for_ec, event_rx, s, sess);
+            },
+        );
     }
 
     // Push initial VAD slider values into the Slint UI from the loaded config.
@@ -783,6 +780,28 @@ fn init_audio(
             .into(),
     );
 
+    // ── Phase 13: Toast dismiss callback ──────────────────────────────────────
+    {
+        let tq = toast_queue.clone();
+        ui.on_toast_dismissed(move |id| {
+            tq.dismiss(id as u64);
+        });
+    }
+
+    // ── Phase 13: Dialog confirm / cancel callbacks ────────────────────────────
+    {
+        let dq = dialog_queue.clone();
+        ui.on_dialog_confirmed(move || {
+            dq.resolve_confirmed();
+        });
+    }
+    {
+        let dq = dialog_queue.clone();
+        ui.on_dialog_cancelled(move || {
+            dq.resolve_cancelled();
+        });
+    }
+
     // Wire the FTS5 search callback. Shared `current_query` mutex tracks whether
     // the user is in search mode so the History Timer can skip its refresh and
     // not clobber search results.
@@ -796,6 +815,7 @@ fn init_audio(
             if let Ok(mut g) = q_for_callback.lock() {
                 *g = q.clone();
             }
+            let searching = !q.trim().is_empty();
             let Some(ref ctx) = ctx_for_search else {
                 return;
             };
@@ -803,14 +823,173 @@ fn init_audio(
                 tracing::debug!("search: DB busy, skipping");
                 return;
             };
-            let text = if q.trim().is_empty() {
-                format_recent_sessions(&guard, ctx.session_id, app_started_at)
-            } else {
-                format_search_results(&guard, q.trim())
-            };
             if let Some(ui) = ui_weak_search.upgrade() {
-                ui.set_history_status(text.into());
+                ui.set_history_is_searching(searching);
+                if searching {
+                    let text = format_search_results(&guard, q.trim());
+                    ui.set_history_status(text.into());
+                } else {
+                    // Rebuild history rows immediately on clear.
+                    let rows = build_history_row_data(&guard);
+                    let model = slint::VecModel::from(rows);
+                    ui.set_history_model(slint::ModelRc::from(std::rc::Rc::new(model)));
+                }
             }
+        });
+    }
+
+    // Phase 11: SharedDetail — holds the currently-viewed session detail.
+    let shared_detail: session_detail::SharedDetail = session_detail::empty_shared_detail();
+
+    // Phase 11: Wire history-row-clicked callback — loads detail + switches view.
+    {
+        let ui_weak_detail = ui.as_weak();
+        let ctx_for_detail = session.as_ref().map(SessionContext::clone_for_task);
+        let detail_cell = shared_detail.clone();
+        let runner_for_detail = summary_runner_early.clone();
+        ui.on_history_row_clicked(move |session_id| {
+            let sid = session_id as i64;
+            let Some(ref ctx) = ctx_for_detail else { return };
+            let Ok(guard) = ctx.conn.try_lock() else {
+                tracing::debug!("detail: DB busy on row click");
+                return;
+            };
+            match session_detail::SessionDetailLoad::from_db(&guard, sid) {
+                Ok(detail) => {
+                    tracing::info!(
+                        session_id = sid,
+                        segment_count = detail.segments.len(),
+                        summary_present = detail.summary.is_some(),
+                        "session-detail: loaded"
+                    );
+                    let summary_state = determine_summary_state(sid, &runner_for_detail, &detail);
+                    let summary_text = detail
+                        .summary
+                        .as_ref()
+                        .map(|s| s.content.clone())
+                        .unwrap_or_default();
+                    if let Ok(mut g) = detail_cell.lock() {
+                        *g = Some(detail.clone());
+                    }
+                    if let Some(ui) = ui_weak_detail.upgrade() {
+                        ui.set_detail_session_id(detail.session.id as i32);
+                        ui.set_detail_started_at(
+                            session_detail::format_timestamp_ms(detail.session.started_at_ms).into()
+                        );
+                        ui.set_detail_duration(
+                            session_detail::format_duration(detail.session.duration_ms).into()
+                        );
+                        ui.set_detail_provider(
+                            slint::SharedString::from(detail.session.provider.as_str())
+                        );
+                        ui.set_detail_summary_text(slint::SharedString::from(summary_text));
+                        ui.set_detail_summary_state(slint::SharedString::from(summary_state));
+                        ui.set_detail_error_message(slint::SharedString::from(""));
+                        let seg_rows = build_detail_segment_rows(&detail.segments);
+                        let seg_model = slint::VecModel::from(seg_rows);
+                        ui.set_detail_segments(slint::ModelRc::from(
+                            std::rc::Rc::new(seg_model)
+                        ));
+                        ui.set_current_view(slint::SharedString::from("session-detail"));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = sid, error = ?e, "session-detail: load failed");
+                }
+            }
+        });
+    }
+
+    // Phase 11: Regenerate button in SessionDetail.
+    {
+        let runner_for_regen = summary_runner_early.clone();
+        let ui_weak_regen = ui.as_weak();
+        ui.on_detail_regenerate_clicked(move |session_id| {
+            let sid = session_id as i64;
+            if runner_for_regen.regen_count(sid) >= 3 {
+                tracing::info!(session_id = sid, "detail: regen cap reached — ignoring");
+                return;
+            }
+            if let Some(ui) = ui_weak_regen.upgrade() {
+                ui.set_detail_summary_state(slint::SharedString::from("computing"));
+            }
+            match vong_storage::open_default() {
+                Ok(conn) => {
+                    let conn_arc = Arc::new(Mutex::new(conn));
+                    tracing::info!(session_id = sid, "detail: regenerate triggered");
+                    runner_for_regen.trigger_detached(conn_arc, sid, true);
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = sid, error = ?e, "detail: cannot open DB for regen");
+                }
+            }
+        });
+    }
+
+    // Phase 11: Copy button in SessionDetail.
+    // Phase 13: push info toast on success.
+    {
+        let detail_cell_copy = shared_detail.clone();
+        let tq_copy = toast_queue.clone();
+        ui.on_detail_copy_clicked(move |session_id| {
+            let sid = session_id as i64;
+            let detail_opt = detail_cell_copy.lock().ok().and_then(|g| g.clone());
+            let Some(detail) = detail_opt else {
+                tracing::debug!(session_id = sid, "detail: copy — no detail loaded");
+                return;
+            };
+            let text = session_detail::format_summary_for_clipboard(&detail);
+            if text.is_empty() {
+                tracing::debug!(session_id = sid, "detail: copy — no summary text");
+                return;
+            }
+            match session_detail::copy_to_clipboard(&text) {
+                Ok(()) => {
+                    tracing::info!(session_id = sid, "detail: summary copied to clipboard");
+                    // Phase 13: visible confirmation instead of silent tracing log.
+                    tq_copy.push("Đã sao chép tóm tắt", ToastSeverity::Info);
+                }
+                Err(e) => {
+                    tracing::warn!(session_id = sid, error = %e, "detail: clipboard write failed");
+                    tq_copy.push("Sao chép thất bại — thử lại", ToastSeverity::Error);
+                }
+            }
+        });
+    }
+
+    // ── Phase 13: Model-switch confirm dialog ──────────────────────────────────
+    // When the user clicks Switch on WhisperModelCard, a Dialog is shown before
+    // the actual swap runs. On Confirm the existing whisper-model-switch-clicked
+    // callback fires unchanged; on Cancel the model stays.
+    {
+        let dq_switch = dialog_queue.clone();
+        let ui_weak_switch = ui.as_weak();
+        let runtime_for_confirm = runtime.handle().clone();
+        ui.on_request_whisper_model_switch_confirm(move |file_name| {
+            let name = file_name.to_string();
+            let dq = dq_switch.clone();
+            let ui_weak = ui_weak_switch.clone();
+            // Open dialog and wait for the user choice on a background task so
+            // we don't block the Slint event loop.
+            let rx = dq.confirm(
+                "Đổi mô hình Whisper",
+                "Đổi mô hình sẽ ngắt phiên ghi âm hiện tại — bạn có muốn tiếp tục?",
+            );
+            runtime_for_confirm.spawn(async move {
+                let confirmed = rx.await.unwrap_or(false);
+                if confirmed {
+                    let name_clone = name.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.invoke_whisper_model_switch_clicked(
+                                slint::SharedString::from(name_clone),
+                            );
+                        }
+                    });
+                } else {
+                    tracing::debug!("model switch cancelled by user");
+                }
+            });
         });
     }
 
@@ -831,6 +1010,11 @@ fn init_audio(
     let session_for_timer = session.as_ref().map(SessionContext::clone_for_task);
     let current_query_for_timer = current_query.clone();
     let transcript_model_for_timer = transcript_model.clone();
+    let toast_queue_for_timer = toast_queue.clone();
+    let dialog_queue_for_timer = dialog_queue.clone();
+    // Phase 13: summary runner for error toast detection.
+    let runner_for_timer = summary_runner_early.clone();
+    let session_id_for_timer = session.as_ref().map(|s| s.session_id).unwrap_or(0);
     let mut ticks: u32 = 0;
     // Track last-seen generation of the transcript stream so we only push
     // to Slint when something actually changed (append or in-place update).
@@ -907,6 +1091,56 @@ fn init_audio(
                 if dropped > 0 {
                     tracing::warn!(dropped, "ring buffer overflow");
                 }
+
+                // ── Phase 13: Push toast stack into Slint ─────────────────────
+                toast_queue_for_timer.prune_expired();
+                let toasts = toast_queue_for_timer.snapshot();
+                let slint_toasts: Vec<ToastEntry> = toasts
+                    .iter()
+                    .map(|t| ToastEntry {
+                        id: t.id.min(i32::MAX as u64) as i32,
+                        message: slint::SharedString::from(t.message.as_str()),
+                        severity: slint::SharedString::from(t.severity.as_str()),
+                        expires_at_ms: t.expires_at_ms.min(i32::MAX as u64) as i32,
+                    })
+                    .collect();
+                let toast_model = slint::VecModel::from(slint_toasts);
+                ui.set_toast_stack(slint::ModelRc::from(
+                    std::rc::Rc::new(toast_model),
+                ));
+
+                // ── Phase 13: Push dialog state into Slint ────────────────────
+                let (d_open, d_title, d_body) = dialog_queue_for_timer.snapshot();
+                ui.set_dialog_open(d_open);
+                ui.set_dialog_title(slint::SharedString::from(d_title));
+                ui.set_dialog_body(slint::SharedString::from(d_body));
+
+                // ── Phase 13: Summary error toast (one per session) ───────────
+                if session_id_for_timer != 0 {
+                    use summary_runner::SummaryState;
+                    let has_error = runner_for_timer
+                        .state
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(&session_id_for_timer).cloned())
+                        .map(|s| matches!(s, SummaryState::Failed(_)))
+                        .unwrap_or(false);
+                    if has_error {
+                        let last_toasted = state_ui
+                            .last_summary_error_toast_session
+                            .load(Ordering::Relaxed);
+                        if last_toasted != session_id_for_timer as u64 {
+                            state_ui.last_summary_error_toast_session.store(
+                                session_id_for_timer as u64,
+                                Ordering::Relaxed,
+                            );
+                            toast_queue_for_timer.push(
+                                "Tóm tắt thất bại — kiểm tra API key OpenAI",
+                                ToastSeverity::Error,
+                            );
+                        }
+                    }
+                }
             }
 
             // Sync Soniox-style transcript stream from Rust Vec → Slint VecModel.
@@ -948,10 +1182,14 @@ fn init_audio(
                 if !searching {
                     if let Some(ref ctx) = session_for_timer {
                         if let Ok(guard) = ctx.conn.try_lock() {
-                            let history_text =
-                                format_recent_sessions(&guard, ctx.session_id, app_started_at);
+                            // Phase 11: push VecModel rows.
+                            let rows = build_history_row_data(&guard);
                             if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_history_status(history_text.into());
+                                let model = slint::VecModel::from(rows);
+                                ui.set_history_model(slint::ModelRc::from(
+                                    std::rc::Rc::new(model)
+                                ));
+                                ui.set_history_is_searching(false);
                             }
                         }
                     }
@@ -1066,7 +1304,7 @@ fn init_audio(
     // Note: for cloud providers, the dictionary still persists and the Whisper
     // cache still rebuilds (no-op since Whisper isn't running), so the UI
     // state stays consistent for when the user switches providers.
-    wire_dictionary_callbacks(ui, dict_file_handle.clone(), provider_mode);
+    wire_dictionary_callbacks(ui, dict_file_handle.clone(), provider_mode, toast_queue.clone());
 
     // Push initial dictionary state into the Slint UI.
     {
@@ -1075,10 +1313,24 @@ fn init_audio(
     }
 
     // ── Phase 10: Auto-summary Settings callbacks ─────────────────────────────
-    wire_autosummary_callbacks(ui, summary_runner_early.clone());
+    wire_autosummary_callbacks(ui, summary_runner_early.clone(), toast_queue.clone());
     // Push initial autosummary state to the UI.
     ui.set_auto_summary_enabled(autosummary::should_auto_summarize());
     ui.set_auto_summary_has_key(vong_transcribe::ApiKey::load("openai-realtime").is_ok());
+
+    // ── Phase 12: Wire provider hot-swap callback ─────────────────────────────
+    // Now that pipeline_handle is fully initialised, wire the ComboBox callback
+    // so selecting a different provider triggers swap_provider instead of showing
+    // the restart banner.
+    wire_provider_hot_swap_callback(
+        ui,
+        pipeline_handle.clone(),
+        session.as_ref().map(SessionContext::clone_for_task),
+        rec_cfg.clone(),
+        runtime.handle().clone(),
+        dialog_queue.clone(),
+        toast_queue.clone(),
+    );
 
     Ok(AudioBundle {
         _active_source: active_source,
@@ -1086,6 +1338,9 @@ fn init_audio(
         _runtime: runtime,
         session,
         summary_runner: summary_runner_early,
+        _toast_queue: toast_queue,
+        _dialog_queue: dialog_queue,
+        _pipeline: pipeline_handle,
     })
 }
 
@@ -1590,32 +1845,12 @@ fn populate_provider_picker(ui: &AppWindow) {
     ui.set_provider_is_cloud(current != ProviderMode::LocalWhisper);
 }
 
-/// Wire the provider picker + API-key save button. Changing the provider
-/// writes the config file and flips `provider-restart-required` so the UI
-/// tells the user to relaunch. Saving the key calls `ApiKey::store(…)`.
+/// Wire the provider picker initial state (options + selected value).
+///
+/// The actual hot-swap callback is wired inside `init_audio` via
+/// `wire_provider_hot_swap_callback` so it has access to `PipelineHandle`.
 fn wire_provider_picker_callbacks(ui: &AppWindow) {
-    let initial = read_provider_mode();
-    let initial_label = provider_label(initial).to_string();
-    let ui_weak = ui.as_weak();
-    ui.on_provider_mode_changed(move |label| {
-        let Some(new_mode) = parse_provider_label(label.as_str()) else {
-            tracing::warn!(label = %label, "unknown provider label");
-            return;
-        };
-        if let Err(e) = write_provider_mode(new_mode) {
-            tracing::warn!(error = ?e, "failed to write provider config");
-        } else {
-            tracing::info!(provider = %new_mode.id(), "provider mode persisted (restart to apply)");
-        }
-        if let Some(ui) = ui_weak.upgrade() {
-            // Only flag restart-required when the new selection differs from
-            // the mode running this session.
-            ui.set_provider_restart_required(label.as_str() != initial_label.as_str());
-            // Toggle API-key field visibility based on new selection.
-            ui.set_provider_is_cloud(new_mode != ProviderMode::LocalWhisper);
-        }
-    });
-
+    // The save-key callback is stateless — wire it here.
     ui.on_save_provider_key(move |provider_label, key| {
         let key_str = key.to_string();
         let Some(mode) = parse_provider_label(provider_label.as_str()) else {
@@ -1631,6 +1866,100 @@ fn wire_provider_picker_callbacks(ui: &AppWindow) {
             Ok(()) => tracing::info!(provider = provider_id, "API key stored in keychain"),
             Err(e) => tracing::warn!(provider = provider_id, error = ?e, "API key store failed"),
         }
+    });
+}
+
+/// Wire the provider-mode ComboBox callback to use hot-swap via PipelineHandle.
+///
+/// Called from `init_audio` after `pipeline_handle` is ready. Selecting a
+/// different provider immediately triggers `swap_provider` — no restart needed.
+/// On swap failure, the UI ComboBox is reverted to the previous selection.
+fn wire_provider_hot_swap_callback(
+    ui: &AppWindow,
+    pipeline: Arc<PipelineHandle>,
+    session: Option<SessionContext>,
+    rec_cfg: recording_config::RecordingConfig,
+    runtime_handle: tokio::runtime::Handle,
+    dialog_queue: DialogQueue,
+    toast_queue: ToastQueue,
+) {
+    let ui_weak = ui.as_weak();
+    ui.on_provider_mode_changed(move |label| {
+        let Some(new_mode) = parse_provider_label(label.as_str()) else {
+            tracing::warn!(label = %label, "unknown provider label");
+            return;
+        };
+
+        // Update API-key field visibility immediately (no await needed).
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_provider_is_cloud(new_mode != ProviderMode::LocalWhisper);
+        }
+
+        // Spawn the async swap on the tokio runtime so we don't block the
+        // Slint event loop.
+        let pipeline = pipeline.clone();
+        let session = session.as_ref().map(SessionContext::clone_for_task);
+        let rec_cfg = rec_cfg.clone();
+        let dialog_queue = dialog_queue.clone();
+        let toast_queue = toast_queue.clone();
+        let ui_weak = ui_weak.clone();
+        let runtime_for_ec = runtime_handle.clone();
+        runtime_handle.spawn(async move {
+            let result = pipeline
+                .swap_provider(
+                    new_mode,
+                    session,
+                    &rec_cfg,
+                    &dialog_queue,
+                    &toast_queue,
+                    move |event_rx, s, sess| {
+                        spawn_event_consumer_handle(&runtime_for_ec, event_rx, s, sess);
+                    },
+                )
+                .await;
+
+            match result {
+                Ok(()) => {
+                    tracing::info!(
+                        new_provider = new_mode.id(),
+                        "provider hot-swap complete"
+                    );
+                    // Update footer label to reflect new provider.
+                    let short = match new_mode {
+                        ProviderMode::LocalWhisper => "Whisper local",
+                        ProviderMode::SonioxCloud => "Soniox",
+                        ProviderMode::OpenAIRealtime => "OpenAI Realtime",
+                    };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_provider_status_label(short.into());
+                            ui.set_current_provider_mode(
+                                provider_label(new_mode).into(),
+                            );
+                        }
+                    });
+                }
+                Err(ref e) => {
+                    // Surface toast; revert ComboBox to the previous selection.
+                    toast_queue.push(e.to_toast_message(), e.toast_severity());
+                    let prev_mode = pipeline.current_mode();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_current_provider_mode(
+                                provider_label(prev_mode).into(),
+                            );
+                            ui.set_provider_is_cloud(
+                                prev_mode != ProviderMode::LocalWhisper
+                            );
+                        }
+                    });
+                    tracing::warn!(
+                        outcome = ?e,
+                        "provider hot-swap returned error"
+                    );
+                }
+            }
+        });
     });
 }
 
@@ -1757,80 +2086,6 @@ fn populate_audio_source_picker(ui: &AppWindow) {
     // — it does both the hot-swap and the config persistence in one place.
 }
 
-/// Format the 5 most recent sessions as a multi-line UI string.
-/// Current session (`current_id`) is annotated with elapsed wall-clock time.
-fn format_recent_sessions(
-    conn: &Connection,
-    current_id: i64,
-    app_started_at: std::time::Instant,
-) -> String {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
-    match list_recent_sessions(conn, 5) {
-        Ok(sessions) if sessions.is_empty() => "(chưa có phiên nào)".to_string(),
-        Ok(sessions) => sessions
-            .iter()
-            .map(|s| format_session_line(s, current_id, now_ms, app_started_at))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(e) => {
-            tracing::warn!(error = ?e, "list_recent_sessions failed");
-            "(không lấy được lịch sử)".to_string()
-        }
-    }
-}
-
-fn format_session_line(
-    s: &Session,
-    current_id: i64,
-    now_ms: i64,
-    app_started_at: std::time::Instant,
-) -> String {
-    let lang = s.detected_language.as_deref().unwrap_or("?");
-    if s.id == current_id {
-        let elapsed = app_started_at.elapsed().as_secs();
-        format!(
-            "  •  #{} đang ghi  ·  {}  ·  {}",
-            s.id,
-            lang,
-            format_duration_secs(elapsed)
-        )
-    } else {
-        let ago = format_ago_ms(now_ms - s.started_at_ms);
-        let dur = s
-            .duration_ms
-            .map(|d| format_duration_secs((d / 1000) as u64))
-            .unwrap_or_else(|| "?".to_string());
-        format!("  •  #{} {} trước  ·  {}  ·  {}", s.id, ago, lang, dur)
-    }
-}
-
-fn format_ago_ms(ms: i64) -> String {
-    let sec = ms.max(0) / 1000;
-    if sec < 60 {
-        format!("{}s", sec)
-    } else if sec < 3600 {
-        format!("{}m", sec / 60)
-    } else if sec < 86_400 {
-        format!("{}h{}m", sec / 3600, (sec % 3600) / 60)
-    } else {
-        format!("{}d", sec / 86_400)
-    }
-}
-
-fn format_duration_secs(sec: u64) -> String {
-    let m = sec / 60;
-    let s = sec % 60;
-    if m > 0 {
-        format!("{}m {}s", m, s)
-    } else {
-        format!("{}s", s)
-    }
-}
-
 /// Run an FTS5 search and format hits as a multi-line UI string.
 /// The FTS5 tokenizer uses `unicode61 remove_diacritics 2`, so the query
 /// "viet" matches "Việt", "viết", "việc" — a key selling point.
@@ -1907,6 +2162,7 @@ fn wire_dictionary_callbacks(
     ui: &AppWindow,
     dict_file_handle: Arc<Mutex<dictionary::DictionaryFile>>,
     provider_mode: ProviderMode,
+    toast_queue: ToastQueue,
 ) {
     let is_cloud = provider_mode != ProviderMode::LocalWhisper;
 
@@ -1914,6 +2170,7 @@ fn wire_dictionary_callbacks(
     {
         let dict = dict_file_handle.clone();
         let ui_weak = ui.as_weak();
+        let tq_add = toast_queue.clone();
         ui.on_dictionary_add(move |phrase, context| {
             let phrase_s = phrase.to_string();
             let mut file = dict.lock().expect("dict poisoned");
@@ -1932,6 +2189,7 @@ fn wire_dictionary_callbacks(
                     });
                     if let Err(e) = dictionary::save(&file) {
                         tracing::warn!(error = %e, "dictionary save failed on add");
+                        tq_add.push("Lưu từ điển thất bại", ToastSeverity::Error);
                     }
                     let entries_snapshot = file.entries.clone();
                     drop(file);
@@ -2082,13 +2340,16 @@ fn wire_dictionary_callbacks(
 // ── Phase 10: Auto-summary Settings callbacks ─────────────────────────────────
 
 /// Wire the Settings → System auto-summary toggle and regenerate callbacks.
-fn wire_autosummary_callbacks(ui: &AppWindow, runner: Arc<SummaryRunner>) {
+fn wire_autosummary_callbacks(ui: &AppWindow, runner: Arc<SummaryRunner>, toast_queue: ToastQueue) {
     // Settings toggle: persist consent + update UI state.
     {
         let ui_weak = ui.as_weak();
+        let tq = toast_queue.clone();
         ui.on_auto_summary_toggled(move |enabled| {
             if let Err(e) = autosummary::save_consent(enabled) {
                 tracing::warn!(error = %e, "autosummary consent save failed");
+                // Phase 13: surface config-save failure.
+                tq.push("Lưu cài đặt tóm tắt thất bại", ToastSeverity::Error);
             }
             tracing::info!(enabled, "auto-summary toggle persisted");
             if let Some(ui) = ui_weak.upgrade() {
@@ -2138,110 +2399,23 @@ fn build_dict_rows(entries: &[DictEntry]) -> Vec<DictionaryEntryRow> {
         .collect()
 }
 
-/// Default `StreamOpts` used by every provider. Per-utterance source language
-/// and target mode actually come from `LiveSttConfig` (mutated by UI), but
-/// `language_hint` here seeds the live config the first time the provider
-/// runs and is also what cloud providers like Soniox use as a startup hint.
-fn default_stream_opts() -> StreamOpts {
-    StreamOpts {
-        language_hint: Some("vi".into()),
-        enable_lid: false,
-        enable_diarization: false,
-        enable_translation_to: None,
-    }
-}
+// Phase 12: spawn_provider_task, spawn_whisper_pipeline, spawn_soniox_pipeline,
+// spawn_openai_pipeline, and spawn_utterance_counter were removed — provider
+// task spawning is now handled by pipeline::PipelineHandle::start and
+// pipeline::build_provider_task.
 
-/// Spawn the streaming-provider driver task. Generic over any
-/// `StreamingTranscriber` implementation so we can pick between
-/// `WhisperLocalProvider`, `SonioxProvider`, and (future) OpenAI Realtime
-/// from the UI provider picker without code duplication.
-fn spawn_provider_task(
-    runtime: &tokio::runtime::Runtime,
-    provider: Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
-    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
-    event_tx: tokio::sync::mpsc::Sender<TranscriptEvent>,
-    opts: StreamOpts,
-) {
-    let provider_name = provider.name();
-    runtime.spawn(async move {
-        if let Err(e) = provider.transcribe_stream(utt_rx, event_tx, opts).await {
-            tracing::error!(provider = provider_name, error = ?e, "STT stream exited with error");
-        } else {
-            tracing::info!(provider = provider_name, "STT stream exited cleanly");
-        }
-    });
-}
-
-/// Wire the Whisper provider into the pipeline (driver task + event consumer
-/// that updates `PipelineState` and persists `Final`/`Translation` events).
+/// Spawn the STT event consumer on the given tokio runtime handle.
 ///
-/// `provider` is `Arc` so the caller can share another reference with a parallel
-/// warmup task that pre-pays the Vulkan first-call shader-init cost.
-fn spawn_whisper_pipeline(
-    runtime: &tokio::runtime::Runtime,
-    provider: Arc<WhisperLocalProvider>,
-    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
-    state: Arc<PipelineState>,
-    session: Option<SessionContext>,
-) {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
-    spawn_provider_task(
-        runtime,
-        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
-        utt_rx,
-        event_tx,
-        default_stream_opts(),
-    );
-    spawn_event_consumer(runtime, event_rx, state, session);
-}
-
-/// Same as `spawn_whisper_pipeline` but for the Soniox cloud provider.
-fn spawn_soniox_pipeline(
-    runtime: &tokio::runtime::Runtime,
-    provider: Arc<SonioxProvider>,
-    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
-    state: Arc<PipelineState>,
-    session: Option<SessionContext>,
-) {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
-    spawn_provider_task(
-        runtime,
-        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
-        utt_rx,
-        event_tx,
-        default_stream_opts(),
-    );
-    spawn_event_consumer(runtime, event_rx, state, session);
-}
-
-/// Same as `spawn_whisper_pipeline` but for the OpenAI Realtime cloud provider.
-fn spawn_openai_pipeline(
-    runtime: &tokio::runtime::Runtime,
-    provider: Arc<OpenAIRealtimeProvider>,
-    utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
-    state: Arc<PipelineState>,
-    session: Option<SessionContext>,
-) {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<TranscriptEvent>(64);
-    spawn_provider_task(
-        runtime,
-        provider as Arc<dyn StreamingTranscriber + Send + Sync + 'static>,
-        utt_rx,
-        event_tx,
-        default_stream_opts(),
-    );
-    spawn_event_consumer(runtime, event_rx, state, session);
-}
-
-/// Generic event consumer — handles Partial / Final / Translation / Error /
-/// Disconnected across all providers. Same semantics regardless of source.
-fn spawn_event_consumer(
-    runtime: &tokio::runtime::Runtime,
+/// Handles Partial / Final / Translation / Error / Disconnected events across
+/// all providers. Wired by the `event_consumer_fn` closure passed to
+/// `PipelineHandle::start` and `swap_provider`.
+pub(crate) fn spawn_event_consumer_handle(
+    handle: &tokio::runtime::Handle,
     mut event_rx: tokio::sync::mpsc::Receiver<TranscriptEvent>,
     state: Arc<PipelineState>,
     session: Option<SessionContext>,
 ) {
-    runtime.spawn(async move {
+    handle.spawn(async move {
         while let Some(evt) = event_rx.recv().await {
             match evt {
                 TranscriptEvent::Connected => {
@@ -2463,25 +2637,6 @@ fn persist_segment(
     }
 }
 
-/// Fallback when Whisper is unavailable — just count utterances so the UI
-/// shows liveness, no transcription happens.
-fn spawn_utterance_counter(
-    runtime: &tokio::runtime::Runtime,
-    mut utt_rx: tokio::sync::mpsc::Receiver<Utterance>,
-    state: Arc<PipelineState>,
-) {
-    runtime.spawn(async move {
-        while let Some(utt) = utt_rx.recv().await {
-            state.utterance_count.fetch_add(1, Ordering::Relaxed);
-            state.last_seq.store(utt.seq, Ordering::Relaxed);
-            state
-                .last_duration_ms
-                .store(utt.duration_ms, Ordering::Relaxed);
-        }
-        tracing::info!("utterance counter exited (channel closed)");
-    });
-}
-
 // ── Phase 2: model download helpers ───────────────────────────────────────
 
 /// Return the models directory where Whisper GGML files are stored.
@@ -2511,6 +2666,15 @@ fn wire_model_download_callbacks(
     dl_cancel: Arc<std::sync::atomic::AtomicBool>,
     models_dir: &Path,
 ) {
+    // Phase 13: toast queue for surfacing download errors in the UI.
+    // Initialised lazily — wired to the same global singleton via Slint event loop.
+    // We pass a fresh queue here; error toasts are pushed via `slint::invoke_from_event_loop`
+    // so they reach the running app's shared queue.
+    // NOTE: The download runs on a background thread without access to the main
+    // app's ToastQueue. We store the error message in `dl_progress.error_msg`
+    // and detect it in the dl_timer closure to push the toast from the Slint thread.
+    // See the `_dl_timer` closure in `main()` which already checks `p.state`.
+    // No additional toast queue reference is needed here — the dl_timer does it.
     let models_dir = models_dir.to_path_buf();
     let dl_cancel_for_start = dl_cancel.clone();
     let dl_progress_for_start = dl_progress.clone();
@@ -2666,6 +2830,7 @@ fn wire_recording_settings_callbacks(
     state: Arc<PipelineState>,
     initial_model_path: Option<PathBuf>,
     runtime: tokio::runtime::Handle,
+    toast_queue: ToastQueue,
 ) {
     // Debounce channel: slider changes post into this, a task drains at 300ms.
     let (debounce_tx, mut debounce_rx) =
@@ -2811,6 +2976,7 @@ fn wire_recording_settings_callbacks(
             let ui_weak2 = ui_weak.clone();
             let file_name_clone = file_name.clone();
             let path_for_blocking = target_path.clone();
+            let tq_swap = toast_queue.clone();
 
             runtime.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
@@ -2836,15 +3002,26 @@ fn wire_recording_settings_callbacks(
                         };
                         if let Err(e) = recording_config::save(&cfg) {
                             tracing::warn!(error = %e, "recording.json model path save failed");
+                            // Phase 13: surface config-save failure.
+                            tq_swap.push("Lưu cấu hình mô hình thất bại", ToastSeverity::Warn);
                         }
                         (true, String::new())
                     }
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "model swap failed");
+                        // Phase 13: surface swap failure.
+                        tq_swap.push(
+                            "Tải mô hình thất bại — giữ mô hình cũ",
+                            ToastSeverity::Error,
+                        );
                         (false, "Tải thất bại — giữ mô hình cũ".to_string())
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "model swap join failed");
+                        tq_swap.push(
+                            "Lỗi tải mô hình — giữ mô hình cũ",
+                            ToastSeverity::Error,
+                        );
                         (false, "Lỗi nội bộ — giữ mô hình cũ".to_string())
                     }
                 };
@@ -2962,6 +3139,100 @@ fn wire_vad_slider_callbacks_only(
     }
     // Whisper model switch is a no-op for cloud providers.
     ui.on_whisper_model_switch_clicked(|_| {});
+}
+
+// ── Phase 11: HistoryRowData + SessionDetail helpers ──────────────────────────
+
+/// Build the `HistoryRowData` VecModel entries from the 10 most-recent sessions.
+/// Fetches summaries in ONE batched query to avoid N+1.
+fn build_history_row_data(conn: &Connection) -> Vec<HistoryRowData> {
+    let sessions = match list_recent_sessions(conn, 10) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = ?e, "history: list_recent_sessions failed");
+            return Vec::new();
+        }
+    };
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    let ids: Vec<i64> = sessions.iter().map(|s| s.id).collect();
+    let summaries = fetch_summaries_for_sessions(conn, &ids).unwrap_or_default();
+
+    sessions
+        .iter()
+        .map(|s| {
+            let summary = summaries.get(&s.id);
+            let preview = session_detail::summary_preview(summary);
+            let started = session_detail::format_timestamp_ms(s.started_at_ms);
+            let duration = session_detail::format_duration(s.duration_ms);
+            let provider = short_provider_label(&s.provider);
+            HistoryRowData {
+                session_id: s.id as i32,
+                started_at: slint::SharedString::from(started),
+                duration: slint::SharedString::from(duration),
+                provider: slint::SharedString::from(provider),
+                summary_preview: slint::SharedString::from(preview),
+            }
+        })
+        .collect()
+}
+
+/// Convert provider id string to short display label.
+fn short_provider_label(provider: &str) -> &str {
+    match provider {
+        "soniox" => "Soniox",
+        "openai-realtime" => "OpenAI",
+        _ => "Whisper",
+    }
+}
+
+/// Build the `DetailSegmentRow` list from a `Segment` slice.
+fn build_detail_segment_rows(segments: &[vong_storage::Segment]) -> Vec<DetailSegmentRow> {
+    segments
+        .iter()
+        .map(|seg| {
+            let ts = format_ms_as_timestamp(seg.start_ms);
+            DetailSegmentRow {
+                timestamp: slint::SharedString::from(ts),
+                speaker: slint::SharedString::from(
+                    seg.speaker_label.as_deref().unwrap_or("")
+                ),
+                text: slint::SharedString::from(seg.text.as_str()),
+            }
+        })
+        .collect()
+}
+
+/// Format segment start_ms as "M:SS" for the detail segment list.
+fn format_ms_as_timestamp(ms: i64) -> String {
+    let secs = (ms / 1000).max(0) as u64;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// Determine the `summary-state` string for the SessionDetail view based on
+/// SummaryRunner state + whether a summary row already exists in the DB.
+fn determine_summary_state(
+    session_id: i64,
+    runner: &summary_runner::SummaryRunner,
+    detail: &session_detail::SessionDetailLoad,
+) -> &'static str {
+    use summary_runner::SummaryState;
+    if let Ok(guard) = runner.state.lock() {
+        match guard.get(&session_id) {
+            Some(SummaryState::Pending) => return "computing",
+            Some(SummaryState::NeedsApiKey) => return "needs-api-key",
+            Some(SummaryState::Failed(_)) => return "error",
+            Some(SummaryState::Done(_)) | Some(SummaryState::Skipped(_)) => {}
+            None => {}
+        }
+    }
+    // Fall back to DB state.
+    if detail.summary.is_some() {
+        "done"
+    } else {
+        "idle"
+    }
 }
 
 /// Read the current VAD config from the live handle and convert to `VadParams`.

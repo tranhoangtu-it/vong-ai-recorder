@@ -303,13 +303,111 @@ component ExportCard inherits Rectangle {
     }
 }
 
-// History + FTS5 search card — when input is empty, `text` holds the recent
-// sessions list (refreshed ~1 Hz). When non-empty, Rust runs `search_transcripts`
-// against the FTS5 virtual table (Vietnamese tone-insensitive via remove_diacritics=2)
-// and `text` holds the formatted hits. Single Slint text node, dual-purpose data.
+// ── Phase 11: HistoryRowData struct + HistoryCard VecModel refactor ──────────
+
+/// One row in the HistoryCard session list.
+/// `summary-preview`: first 80 chars of the summary content, or "Chưa tóm tắt".
+export struct HistoryRowData {
+    session-id: int,
+    started-at: string,   // "2025-05-23 14:30"
+    duration: string,     // "5m 12s" or "—"
+    provider: string,     // "Whisper local" | "Soniox" | "OpenAI"
+    summary-preview: string,
+}
+
+// One clickable row in the HistoryCard list.
+component HistoryRow inherits Rectangle {
+    in property <HistoryRowData> data;
+    callback clicked(int);
+
+    background: touch.has-hover ? Tokens.surface-hover : transparent;
+    border-radius: 6px;
+    height: 64px;
+    animate background { duration: 80ms; }
+
+    touch := TouchArea {
+        clicked => { root.clicked(root.data.session-id); }
+    }
+
+    VerticalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 4px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+
+            Text {
+                text: data.started-at;
+                font-size: Tokens.font-caption;
+                font-weight: 600;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+
+            Text {
+                text: data.duration;
+                font-size: Tokens.font-caption;
+                color: Tokens.text-hint;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalBox {
+            spacing: 6px;
+            alignment: start;
+
+            Rectangle {
+                background: #1e1333;
+                border-radius: 3px;
+                width: 52px;
+                height: 16px;
+                Text {
+                    text: data.provider;
+                    font-size: 9px;
+                    color: Tokens.accent;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            Text {
+                text: data.summary-preview;
+                font-size: Tokens.font-caption;
+                color: Tokens.text-secondary;
+                overflow: elide;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // Right-pointing arrow indicator
+    Text {
+        x: parent.width - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        text: "›";
+        font-size: 18px;
+        color: touch.has-hover ? Tokens.accent : Tokens.text-hint;
+        animate color { duration: 80ms; }
+    }
+}
+
+// History + FTS5 search card — refactored from plain text to VecModel-driven rows.
+// `history-model` is a [HistoryRowData] pushed by Rust at ~1 Hz.
+// When search input is non-empty, `search-text` holds formatted FTS5 hits (legacy path).
 component HistoryCard inherits Rectangle {
-    in property <string> text;
+    in property <[HistoryRowData]> history-model: [];
+    in property <string> search-text: "";   // FTS5 results when user is searching
+    in property <bool> is-searching: false; // true while search query is non-empty
     callback search-changed(string);
+    callback row-clicked(int);             // emits session_id
 
     background: Tokens.surface;
     border-radius: 8px;
@@ -346,11 +444,351 @@ component HistoryCard inherits Rectangle {
             }
         }
 
-        Text {
-            text: text;
+        // Search results (plain text, legacy FTS5 display)
+        if is-searching: Text {
+            text: search-text;
             font-size: Tokens.font-caption;
             color: Tokens.text-secondary;
             wrap: word-wrap;
+        }
+
+        // Session rows (when not searching)
+        if !is-searching: VerticalLayout {
+            spacing: 2px;
+            alignment: start;
+
+            if history-model.length == 0: Text {
+                text: "Chưa có phiên nào được lưu.";
+                font-size: Tokens.font-caption;
+                color: Tokens.text-hint;
+                horizontal-alignment: center;
+            }
+
+            for entry in history-model: HistoryRow {
+                data: entry;
+                clicked(id) => { root.row-clicked(id); }
+            }
+        }
+    }
+}
+
+// ── Phase 11: SessionDetail components ───────────────────────────────────────
+
+/// One row in the transcript segments list inside SessionDetail.
+component TranscriptSegmentRow inherits Rectangle {
+    in property <string> timestamp;      // "0:05"
+    in property <string> speaker;        // "" or "Speaker 1"
+    in property <string> segment-text;   // transcript text
+
+    background: transparent;
+    height: 40px;
+
+    HorizontalBox {
+        spacing: 10px;
+        alignment: start;
+        padding: 4px;
+
+        Text {
+            text: timestamp;
+            font-size: Tokens.font-caption;
+            color: Tokens.text-hint;
+            vertical-alignment: top;
+            width: 40px;
+        }
+
+        if speaker != "": Text {
+            text: speaker;
+            font-size: Tokens.font-caption;
+            color: Tokens.accent;
+            font-weight: 600;
+            vertical-alignment: top;
+            width: 64px;
+            overflow: elide;
+        }
+
+        Text {
+            text: segment-text;
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-primary;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+            vertical-alignment: top;
+        }
+    }
+}
+
+/// Slint-side view-model for a single transcript segment in SessionDetail.
+export struct DetailSegmentRow {
+    timestamp: string,
+    speaker: string,
+    text: string,
+}
+
+/// Summary card at the top of the SessionDetail view.
+/// Shows the summary text + Regenerate / Copy action buttons.
+component SessionDetailCard inherits Rectangle {
+    in property <string> summary-text: "";
+    // "idle" | "computing" | "done" | "needs-api-key" | "error"
+    in property <string> summary-state: "idle";
+    in property <string> error-message: "";
+    callback regenerate-clicked();
+    callback copy-clicked();
+
+    background: Tokens.surface;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Tokens.border;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+
+            HorizontalBox {
+                spacing: 8px;
+                alignment: start;
+                Rectangle {
+                    width: 8px; height: 8px; border-radius: 4px;
+                    background: Tokens.accent;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "Tóm tắt phiên";
+                    font-size: Tokens.font-secondary;
+                    font-weight: 600;
+                    color: Tokens.text-primary;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Action buttons row (Regenerate + Copy)
+            HorizontalBox {
+                spacing: 6px;
+                alignment: end;
+
+                regen-btn := TouchArea {
+                    width: 90px;
+                    height: 28px;
+                    enabled: summary-state != "computing";
+                    clicked => { root.regenerate-clicked(); }
+                    Rectangle {
+                        background: regen-btn.has-hover && regen-btn.enabled
+                            ? Tokens.accent : #3d2472;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Tokens.accent;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: "↺ Tạo lại";
+                            font-size: Tokens.font-caption;
+                            font-weight: 600;
+                            color: regen-btn.enabled ? Tokens.text-primary : Tokens.text-hint;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                copy-btn := TouchArea {
+                    width: 68px;
+                    height: 28px;
+                    enabled: summary-state == "done" && summary-text != "";
+                    clicked => { root.copy-clicked(); }
+                    Rectangle {
+                        background: copy-btn.has-hover && copy-btn.enabled
+                            ? Tokens.accent : #262626;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: copy-btn.enabled ? Tokens.accent : Tokens.border;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: "📋 Sao chép";
+                            font-size: Tokens.font-caption;
+                            font-weight: 600;
+                            color: copy-btn.enabled ? Tokens.text-primary : Tokens.text-hint;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Summary body — conditional on state
+        if summary-state == "computing": HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Text { text: "⏳"; font-size: 16px; color: Tokens.text-hint; vertical-alignment: center; }
+            Text {
+                text: "Đang tạo tóm tắt…";
+                font-size: Tokens.font-secondary;
+                color: Tokens.text-secondary;
+                vertical-alignment: center;
+            }
+        }
+
+        if summary-state == "needs-api-key": Text {
+            text: "Cần API key OpenAI — cấu hình trong Cài đặt → System.";
+            font-size: Tokens.font-secondary;
+            color: Tokens.danger;
+            wrap: word-wrap;
+        }
+
+        if summary-state == "error": Text {
+            text: error-message != "" ? error-message : "Lỗi tạo tóm tắt — nhấn Tạo lại để thử.";
+            font-size: Tokens.font-secondary;
+            color: Tokens.danger;
+            wrap: word-wrap;
+        }
+
+        if summary-state == "idle": Text {
+            text: "Chưa có tóm tắt. Bật tự động tóm tắt hoặc nhấn Tạo lại.";
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-hint;
+            wrap: word-wrap;
+        }
+
+        if summary-state == "done" && summary-text != "": Text {
+            text: summary-text;
+            font-size: Tokens.font-secondary;
+            color: Tokens.text-primary;
+            wrap: word-wrap;
+        }
+    }
+}
+
+/// Full-screen SessionDetail view — header + summary card + scrollable segments.
+component SessionDetailView inherits Rectangle {
+    // Header metadata
+    in property <int>    detail-session-id: 0;
+    in property <string> detail-started-at: "";
+    in property <string> detail-duration: "";
+    in property <string> detail-provider: "";
+    // Summary state (forwarded to SessionDetailCard)
+    in property <string> detail-summary-text: "";
+    in property <string> detail-summary-state: "idle";
+    in property <string> detail-error-message: "";
+    // Segments list
+    in property <[DetailSegmentRow]> detail-segments: [];
+    callback back-clicked();
+    callback detail-regenerate-clicked(int);
+    callback detail-copy-clicked(int);
+
+    background: Tokens.bg;
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── Sub-header row ───────────────────────────────────────────────────
+        Rectangle {
+            height: 52px;
+            background: Tokens.surface;
+
+            HorizontalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                spacing: 12px;
+                alignment: start;
+
+                back-touch := TouchArea {
+                    width: 36px;
+                    clicked => { root.back-clicked(); }
+                    Text {
+                        text: "←";
+                        font-size: 20px;
+                        color: back-touch.has-hover ? Tokens.accent : Tokens.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "Phiên #" + detail-session-id + "  ·  " + detail-provider;
+                        font-size: Tokens.font-secondary;
+                        font-weight: 600;
+                        color: Tokens.text-primary;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: detail-started-at + "  ·  " + detail-duration;
+                        font-size: Tokens.font-caption;
+                        color: Tokens.text-secondary;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            // Bottom hairline
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: Tokens.border;
+            }
+        }
+
+        // ── Scrollable content ────────────────────────────────────────────────
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 16px;
+                alignment: start;
+
+                // Summary card
+                SessionDetailCard {
+                    summary-text: root.detail-summary-text;
+                    summary-state: root.detail-summary-state;
+                    error-message: root.detail-error-message;
+                    regenerate-clicked => { root.detail-regenerate-clicked(root.detail-session-id); }
+                    copy-clicked => { root.detail-copy-clicked(root.detail-session-id); }
+                }
+
+                // Segments section header
+                HorizontalBox {
+                    spacing: 8px;
+                    alignment: start;
+                    Rectangle {
+                        width: 8px; height: 8px; border-radius: 4px;
+                        background: Tokens.accent;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: "Nội dung phiên  ·  " + detail-segments.length + " đoạn";
+                        font-size: Tokens.font-secondary;
+                        font-weight: 600;
+                        color: Tokens.text-primary;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if detail-segments.length == 0: Text {
+                    text: "Chưa có đoạn nào được ghi.";
+                    font-size: Tokens.font-secondary;
+                    color: Tokens.text-hint;
+                    horizontal-alignment: center;
+                }
+
+                // Segments list
+                VerticalLayout {
+                    spacing: 2px;
+                    alignment: start;
+                    for seg in detail-segments: TranscriptSegmentRow {
+                        timestamp: seg.timestamp;
+                        speaker: seg.speaker;
+                        segment-text: seg.text;
+                    }
+                }
+            }
         }
     }
 }
@@ -495,14 +933,12 @@ component CrashReportCard inherits Rectangle {
 // Whisper local is the offline default. Cloud providers (Soniox, OpenAI
 // Realtime) give true word-by-word streaming partials but need an API key
 // stored in the OS Keychain (BYOK). The save button writes the key via
-// `ApiKey::store("<provider>", key)`. Switching provider needs a restart
-// to take effect because hot-swapping the running stream task is not
-// implemented yet.
+// `ApiKey::store("<provider>", key)`. Switching provider applies immediately
+// via PipelineHandle hot-swap — no restart required.
 component ProviderCard inherits Rectangle {
     in property <[string]> provider-options;
     in property <string> current-provider;
     in property <bool> show-api-key;       // true for cloud providers
-    in property <bool> restart-required;
     in-out property <string> pending-key;
     callback provider-changed(string);
     callback save-key(string, string); // provider-label, key
@@ -576,13 +1012,6 @@ component ProviderCard inherits Rectangle {
                     }
                 }
             }
-        }
-
-        if restart-required: Text {
-            text: "↻  Khởi động lại Vọng để áp dụng provider mới";
-            font-size: Tokens.font-caption;
-            color: Tokens.danger;
-            wrap: word-wrap;
         }
     }
 }
@@ -1038,12 +1467,20 @@ component VadSlidersCard inherits Rectangle {
 
 /// Card: Whisper model picker for LocalWhisper provider.
 /// Hidden (replaced by a hint) when the active provider is Soniox/OpenAI.
+///
+/// Phase 13: clicking Switch now emits `request-model-switch-confirm(name)`
+/// instead of `switch-clicked` directly. Rust opens a Dialog; on confirm it
+/// calls `switch-clicked` to run the actual swap. This keeps the card decoupled
+/// from the Dialog infrastructure.
 component WhisperModelCard inherits Rectangle {
     in property <[WhisperModelEntry]> entries;
     in property <string>              active;
     in property <bool>                switch-in-flight: false;
     in property <string>              switch-status: "";
     in property <bool>                provider-is-local-whisper: true;
+    /// Emitted when user clicks Switch — Rust opens Dialog before proceeding.
+    callback request-model-switch-confirm(string);
+    /// Emitted by Rust after dialog confirm — runs the actual swap.
     callback switch-clicked(string);
 
     background: Tokens.surface;
@@ -1130,7 +1567,8 @@ component WhisperModelCard inherits Rectangle {
                     if !entry.is-active && !root.switch-in-flight: switch-btn := TouchArea {
                         width: 68px;
                         height: 28px;
-                        clicked => { root.switch-clicked(entry.name); }
+                        // Phase 13: opens confirm dialog before executing swap.
+                        clicked => { root.request-model-switch-confirm(entry.name); }
                         Rectangle {
                             background: switch-btn.has-hover ? Tokens.accent : #6d3fe0;
                             border-radius: 4px;
@@ -1605,7 +2043,6 @@ component SettingsScreen inherits Rectangle {
     in property <[string]> provider-options;
     in property <string> current-provider;
     in property <bool> provider-is-cloud;
-    in property <bool> provider-restart-required;
     in-out property <string> pending-api-key;
     callback provider-changed(string);
     callback save-provider-key(string, string);
@@ -1632,6 +2069,8 @@ component SettingsScreen inherits Rectangle {
     in property <string>  active-whisper-model: "";
     in property <bool>    model-switch-in-flight: false;
     in property <string>  model-switch-status: "";
+    /// Phase 13: fires confirm request; Rust wraps with Dialog before swap.
+    callback request-whisper-model-switch-confirm(string);
     callback whisper-model-switch-clicked(string);
 
     // ─ Phase 8: Dictionary custom vocabulary
@@ -1745,7 +2184,6 @@ component SettingsScreen inherits Rectangle {
                             provider-options: root.provider-options;
                             current-provider: root.current-provider;
                             show-api-key: root.provider-is-cloud;
-                            restart-required: root.provider-restart-required;
                             pending-key <=> root.pending-api-key;
                             provider-changed(v) => { root.provider-changed(v); }
                             save-key(p, k) => { root.save-provider-key(p, k); }
@@ -1861,6 +2299,10 @@ component SettingsScreen inherits Rectangle {
                             switch-in-flight: root.model-switch-in-flight;
                             switch-status: root.model-switch-status;
                             provider-is-local-whisper: !root.provider-is-cloud;
+                            // Phase 13: confirm-first path.
+                            request-model-switch-confirm(name) => {
+                                root.request-whisper-model-switch-confirm(name);
+                            }
                             switch-clicked(name) => { root.whisper-model-switch-clicked(name); }
                         }
                     }
@@ -2224,6 +2666,227 @@ component ModelDownloadCard inherits Rectangle {
     }
 }
 
+// ── Phase 13: Toast + Dialog infrastructure ──────────────────────────────────
+
+/// View-model for one toast banner entry. Pushed from Rust at 30 Hz.
+/// `severity` ∈ "info" | "warn" | "error" — drives background color.
+export struct ToastEntry {
+    id: int,
+    message: string,
+    severity: string,
+    expires-at-ms: int,
+}
+
+/// One floating toast card. Auto-dismissed when `expires-at-ms` passes
+/// (the Rust timer prunes expired entries before pushing the model).
+/// Manual close via the ✕ button fires `close-clicked(id)`.
+component Toast inherits Rectangle {
+    in property <ToastEntry> entry;
+    callback close-clicked(int);
+
+    background: entry.severity == "error" ? #3a1010
+               : entry.severity == "warn"  ? #2a2010
+               : #0f2a1a;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: entry.severity == "error" ? Tokens.danger
+                : entry.severity == "warn"  ? #FBBF24
+                : Tokens.success;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: #00000066;
+    height: 48px;
+    width: 320px;
+
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
+        alignment: space-between;
+
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            horizontal-stretch: 1;
+
+            Text {
+                text: entry.severity == "error" ? "✕"
+                    : entry.severity == "warn"  ? "⚠"
+                    : "✓";
+                font-size: 14px;
+                color: entry.severity == "error" ? Tokens.danger
+                     : entry.severity == "warn"  ? #FBBF24
+                     : Tokens.success;
+                vertical-alignment: center;
+                width: 16px;
+            }
+
+            Text {
+                text: entry.message;
+                font-size: Tokens.font-caption;
+                color: Tokens.text-primary;
+                vertical-alignment: center;
+                wrap: no-wrap;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+
+        close-btn := TouchArea {
+            width: 24px;
+            height: 24px;
+            clicked => { root.close-clicked(root.entry.id); }
+            Rectangle {
+                background: close-btn.has-hover ? Tokens.surface-hover : transparent;
+                border-radius: 4px;
+                animate background { duration: 80ms; }
+                Text {
+                    text: "✕";
+                    font-size: Tokens.font-caption;
+                    color: Tokens.text-hint;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+/// Vertical stack of toast cards pinned to the top-right corner of the window.
+/// Rendered last in AppWindow so it sits on top of all other content (z-order).
+component ToastStack inherits Rectangle {
+    in property <[ToastEntry]> toasts: [];
+    callback dismiss-toast(int);
+
+    background: transparent;
+    // Clip false — toasts should not be clipped by window edges
+    clip: false;
+
+    VerticalLayout {
+        alignment: start;
+        spacing: 6px;
+        padding: 16px;
+
+        for t in toasts: Toast {
+            entry: t;
+            close-clicked(id) => { root.dismiss-toast(id); }
+        }
+    }
+}
+
+/// Full-window modal dialog with a semi-transparent backdrop.
+/// Emits `dialog-confirmed()` or `dialog-cancelled()` on user choice.
+/// Esc key dismisses as cancel via the backdrop TouchArea.
+component Dialog inherits Rectangle {
+    in property <bool>   dialog-open: false;
+    in property <string> dialog-title: "";
+    in property <string> dialog-body: "";
+    callback dialog-confirmed();
+    callback dialog-cancelled();
+
+    // Full-window backdrop — dims the content behind and blocks input.
+    background: dialog-open ? #00000099 : transparent;
+
+    // Only participate in hit-testing when open.
+    if dialog-open: backdrop := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        // Clicking the backdrop cancels.
+        clicked => { root.dialog-cancelled(); }
+    }
+
+    if dialog-open: Rectangle {
+        // Center the card.
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 400px;
+        height: card-layout.preferred-height + 0px;
+
+        background: #1a1a1a;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Tokens.border;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #000000bb;
+
+        // Stop click propagation — clicks inside the card should NOT cancel.
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            // No-op: just consumes the click so backdrop doesn't fire.
+        }
+
+        card-layout := VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+
+            // Title
+            Text {
+                text: dialog-title;
+                font-size: Tokens.font-body;
+                font-weight: 700;
+                color: Tokens.text-primary;
+                wrap: word-wrap;
+                horizontal-alignment: left;
+            }
+
+            // Body
+            Text {
+                text: dialog-body;
+                font-size: Tokens.font-secondary;
+                color: Tokens.text-secondary;
+                wrap: word-wrap;
+                horizontal-alignment: left;
+            }
+
+            // Buttons row — "Huỷ" on left, "Đồng ý" on right
+            HorizontalBox {
+                spacing: 8px;
+                alignment: end;
+
+                cancel-btn := TouchArea {
+                    width: 80px;
+                    height: 32px;
+                    clicked => { root.dialog-cancelled(); }
+                    Rectangle {
+                        background: cancel-btn.has-hover ? Tokens.surface-hover : Tokens.surface;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Tokens.border;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: "Huỷ";
+                            font-size: Tokens.font-secondary;
+                            font-weight: 600;
+                            color: Tokens.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                confirm-btn := TouchArea {
+                    width: 96px;
+                    height: 32px;
+                    clicked => { root.dialog-confirmed(); }
+                    Rectangle {
+                        background: confirm-btn.has-hover ? Tokens.accent : #6d3fe0;
+                        border-radius: 6px;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: "Đồng ý";
+                            font-size: Tokens.font-secondary;
+                            font-weight: 600;
+                            color: white;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Vọng AI Recorder";
     // Soniox-style wide layout: sidebar 280 + main ≥ 800 = 1080 minimum
@@ -2238,7 +2901,7 @@ export component AppWindow inherits Window {
     //   pipeline-status  — "🔇 Listening…" idle / "🗣 N utterances · …" active
     //   last-transcript  — most recent Whisper Final text (empty until first utterance)
     //   storage-status   — "📝 Session #N · X segments saved" or "📝 In-memory only"
-    //   history-status   — formatted recent-sessions list (refreshed ~1Hz)
+    //   history-status   — legacy plain-text fallback (used when is-searching = true)
     in property <float> peak-level: 0.0;
     in property <string> audio-status: "Khởi tạo microphone…";
     in property <string> pipeline-status: "🔇  Listening…";
@@ -2247,6 +2910,27 @@ export component AppWindow inherits Window {
     in property <string> history-status: "📜  Đang tải lịch sử…";
     in property <[TranscriptLine]> transcript-lines: [];
     callback search-changed(string);
+
+    // ── Phase 11: HistoryCard VecModel + SessionDetail ────────────────────────
+    in property <[HistoryRowData]> history-model: [];
+    in property <bool> history-is-searching: false;
+    // Callback when user clicks a history row.
+    callback history-row-clicked(int);
+
+    // SessionDetail view state (populated when current-view = "session-detail")
+    in property <int>    detail-session-id: 0;
+    in property <string> detail-started-at: "";
+    in property <string> detail-duration: "";
+    in property <string> detail-provider: "";
+    in property <string> detail-summary-text: "";
+    // "idle" | "computing" | "done" | "needs-api-key" | "error"
+    in property <string> detail-summary-state: "idle";
+    in property <string> detail-error-message: "";
+    in property <[DetailSegmentRow]> detail-segments: [];
+    // Called when user clicks Regenerate in SessionDetail.
+    callback detail-regenerate-clicked(int);
+    // Called when user clicks Copy in SessionDetail.
+    callback detail-copy-clicked(int);
 
     // Audio source picker
     in property <[string]> audio-sources;
@@ -2304,7 +2988,6 @@ export component AppWindow inherits Window {
     in property <[string]> provider-mode-options;
     in property <string> current-provider-mode;
     in property <bool> provider-is-cloud: false;
-    in property <bool> provider-restart-required: false;
     in-out property <string> pending-api-key;
     callback provider-mode-changed(string);
     callback save-provider-key(string, string);
@@ -2325,6 +3008,8 @@ export component AppWindow inherits Window {
     in property <string>  active-whisper-model: "";
     in property <bool>    model-switch-in-flight: false;
     in property <string>  model-switch-status: "";
+    // Phase 13: user clicked Switch → Rust shows confirm dialog before swapping.
+    callback request-whisper-model-switch-confirm(string);
     callback whisper-model-switch-clicked(string);
 
     // ── Phase 8: Dictionary custom vocabulary ─────────────────────────────────
@@ -2357,6 +3042,21 @@ export component AppWindow inherits Window {
     in property <bool> auto-summary-has-key: false;
     callback auto-summary-toggled(bool);
     callback summary-regenerate-clicked(int);
+
+    // ─ Phase 13: Toast banner stack ──────────────────────────────────────────
+    // Rust 30 Hz timer pushes this from ToastQueue::snapshot().
+    in property <[ToastEntry]> toast-stack: [];
+    // Fired when user clicks ✕ on a toast — Rust calls ToastQueue::dismiss(id).
+    callback toast-dismissed(int);
+
+    // ─ Phase 13: Modal confirm dialog ────────────────────────────────────────
+    // Driven by DialogQueue::snapshot() in the 30 Hz timer.
+    in property <bool>   dialog-open: false;
+    in property <string> dialog-title: "";
+    in property <string> dialog-body: "";
+    // Fired by the confirm/cancel buttons — Rust calls DialogQueue::resolve_*.
+    callback dialog-confirmed();
+    callback dialog-cancelled();
 
     // ─ Phase 9: Debug-only test trigger (never compiled in release) ───────────
     // Calling this from a debug build fires tracing::error! + panic! to verify
@@ -2456,9 +3156,25 @@ export component AppWindow inherits Window {
 
         // Header shown only when not in wizard view
         if current-view != "wizard": HeaderBar {
-            in-settings: current-view == "settings";
+            in-settings: current-view == "settings" || current-view == "session-detail";
             settings-clicked => { root.current-view = "settings"; }
             back-clicked => { root.current-view = "main"; }
+        }
+
+        // ─── Session detail view ───
+        if current-view == "session-detail": SessionDetailView {
+            vertical-stretch: 1;
+            detail-session-id: detail-session-id;
+            detail-started-at: detail-started-at;
+            detail-duration: detail-duration;
+            detail-provider: detail-provider;
+            detail-summary-text: detail-summary-text;
+            detail-summary-state: detail-summary-state;
+            detail-error-message: detail-error-message;
+            detail-segments: detail-segments;
+            back-clicked => { root.current-view = "main"; }
+            detail-regenerate-clicked(id) => { root.detail-regenerate-clicked(id); }
+            detail-copy-clicked(id) => { root.detail-copy-clicked(id); }
         }
 
         // ─── Settings view ───
@@ -2474,7 +3190,6 @@ export component AppWindow inherits Window {
             provider-options: provider-mode-options;
             current-provider: current-provider-mode;
             provider-is-cloud: provider-is-cloud;
-            provider-restart-required: provider-restart-required;
             pending-api-key <=> pending-api-key;
             provider-changed(v) => { root.provider-mode-changed(v); }
             save-provider-key(p, k) => { root.save-provider-key(p, k); }
@@ -2498,6 +3213,9 @@ export component AppWindow inherits Window {
             active-whisper-model: active-whisper-model;
             model-switch-in-flight: model-switch-in-flight;
             model-switch-status: model-switch-status;
+            request-whisper-model-switch-confirm(name) => {
+                root.request-whisper-model-switch-confirm(name);
+            }
             whisper-model-switch-clicked(name) => { root.whisper-model-switch-clicked(name); }
 
             // ── Phase 8: Dictionary
@@ -2559,10 +3277,11 @@ export component AppWindow inherits Window {
                         // only per-session controls (history + export).
 
                         HistoryCard {
-                            text: history-status;
-                            search-changed(q) => {
-                                root.search-changed(q);
-                            }
+                            history-model: history-model;
+                            search-text: history-status;
+                            is-searching: history-is-searching;
+                            search-changed(q) => { root.search-changed(q); }
+                            row-clicked(id) => { root.history-row-clicked(id); }
                         }
 
                         ExportCard {
@@ -2732,5 +3451,30 @@ export component AppWindow inherits Window {
                 background: Tokens.border;
             }
         }
+    }
+
+    // ── Phase 13: Toast stack — top-right overlay, above all views ────────────
+    // Absolutely positioned so it floats over whatever view is active.
+    // Rendered outside the VerticalBox so Slint's z-order puts it on top.
+    if toast-stack.length > 0: ToastStack {
+        x: parent.width - self.width;
+        y: 0;
+        width: 352px;   // 320px card + 16px*2 padding
+        height: parent.height;
+        toasts: toast-stack;
+        dismiss-toast(id) => { root.toast-dismissed(id); }
+    }
+
+    // ── Phase 13: Modal dialog overlay — above everything including toasts ────
+    // Full-window size so backdrop covers the entire window.
+    Dialog {
+        x: 0; y: 0;
+        width: parent.width;
+        height: parent.height;
+        dialog-open: dialog-open;
+        dialog-title: dialog-title;
+        dialog-body: dialog-body;
+        dialog-confirmed => { root.dialog-confirmed(); }
+        dialog-cancelled => { root.dialog-cancelled(); }
     }
 }

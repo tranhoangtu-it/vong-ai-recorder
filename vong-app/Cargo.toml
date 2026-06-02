@@ -61,6 +61,9 @@ tray-icon = "0.24"      # System tray + menu
 global-hotkey = "0.8"   # Ctrl+Shift+R toggle window visibility
 muda = "0.19"           # Menu items used by tray-icon
 
+# Phase 11: clipboard for "Copy summary" button in SessionDetail view.
+arboard = "3"
+
 # Future phases:
 # vong-ui = { workspace = true }
 

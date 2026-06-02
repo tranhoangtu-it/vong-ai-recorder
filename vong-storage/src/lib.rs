@@ -22,8 +22,8 @@ pub use export::{export_markdown, export_srt, export_text};
 pub use models::{normalize, NewSegment, NewSession, NewSummary, SearchHit, Segment, Session, Summary};
 pub use repository::{
     delete_session, delete_summaries_for_session, fetch_latest_summary, fetch_segments_for_session,
-    fetch_session, finalize_session, insert_segment, insert_session, insert_summary,
-    list_recent_sessions,
+    fetch_session, fetch_summaries_for_sessions, finalize_session, insert_segment, insert_session,
+    insert_summary, list_recent_sessions,
 };
 pub use search::search_transcripts;
 

@@ -145,6 +145,54 @@ pub fn fetch_latest_summary(
     }
 }
 
+/// Fetch the most-recent summary for each of the given session ids in one query.
+/// Returns a map of session_id → Summary. Sessions with no summary are absent from the map.
+/// Uses a single SQL query to avoid N+1 patterns when rendering the HistoryCard.
+pub fn fetch_summaries_for_sessions(
+    conn: &Connection,
+    session_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Summary>, StorageError> {
+    if session_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    // Strategy: fetch MAX(id) per session_id in the given set, then join back.
+    // This is a single pass with N bind params (one per session id).
+    let placeholders = (1..=session_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT s.id, s.session_id, s.kind, s.llm_provider, s.llm_model, s.content, s.created_at
+         FROM summaries s
+         INNER JOIN (
+             SELECT MAX(id) AS max_id
+             FROM summaries
+             WHERE session_id IN ({placeholders})
+             GROUP BY session_id
+         ) latest ON s.id = latest.max_id"
+    );
+    let params: Vec<rusqlite::types::Value> = session_ids
+        .iter()
+        .map(|&id| rusqlite::types::Value::Integer(id))
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok(Summary {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                kind: row.get(2)?,
+                llm_provider: row.get(3)?,
+                llm_model: row.get(4)?,
+                content: row.get(5)?,
+                created_at_ms: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let map = rows.into_iter().map(|s| (s.session_id, s)).collect();
+    Ok(map)
+}
+
 /// Delete all summary rows for a session. Used before regenerating.
 pub fn delete_summaries_for_session(
     conn: &Connection,

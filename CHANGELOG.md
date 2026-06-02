@@ -5,11 +5,13 @@ versioning follows [SemVer](https://semver.org/) (pre-1.0 = breaking changes pos
 
 ## [Unreleased]
 
-Sprint 1 + 2 — production v1.0-beta.1 readiness, then power-user polish.
-Sprint 1 (6 phases): MSI installer, in-app model downloader, first-run
-wizard, landing page, R2 release pipeline, beta QA docs. Sprint 2 (4 phases):
-Recording settings sliders, custom Dictionary, opt-in Sentry crash reporting,
-LLM session summaries (OpenAI gpt-4o-mini).
+Sprint 1 + 2 + 3 — production v1.0-beta.1 readiness, then power-user polish,
+then final UX integration. Sprint 1 (6 phases): MSI installer, in-app model
+downloader, first-run wizard, landing page, R2 release pipeline, beta QA
+docs. Sprint 2 (4 phases): Recording settings sliders, custom Dictionary,
+opt-in Sentry crash reporting, LLM session summaries (OpenAI gpt-4o-mini).
+Sprint 3 (3 phases): HistoryCard + SessionDetail view + Summary preview,
+Toast + Dialog Slint infrastructure, Provider hot-swap (no restart needed).
 
 ### Added
 
@@ -97,6 +99,44 @@ LLM session summaries (OpenAI gpt-4o-mini).
   toggle (default ON when key exists). Cost ~$0.0006/session for 30-min
   meeting. HistoryCard preview + SessionDetail summary card deferred to
   Sprint 3 (HistoryCard needs VecModel refactor). 14 new tests.
+- **Phase 11 — HistoryCard refactor + SessionDetail view + Summary preview**
+  (`vong-app/src/session_detail.rs`, `vong-storage::fetch_summaries_for_sessions`).
+  HistoryCard refactored from plain text widget to VecModel-driven rows
+  (`HistoryRowData { session_id, started_at, duration, provider,
+  summary_preview }`); summary preview shows first 80 chars of
+  `Summary.content` or 'Chưa tóm tắt' fallback. Batched SQL fetch via
+  `MAX(id) GROUP BY session_id` self-join - no N+1. New top-level
+  `SessionDetail` view routed via `current-view == "session-detail"`:
+  header (session id, started_at, duration, provider) + `SessionDetailCard`
+  (full summary text + Regenerate / Copy / Close) + scrollable transcript
+  segment list. Copy uses `arboard 3` cross-platform clipboard.
+  4 new tests.
+- **Phase 13 — Toast banner + Dialog modal infrastructure + Phase 7
+  confirm wire** (`vong-app/src/toast.rs`, `vong-app/src/dialog.rs`).
+  Reusable Slint `Toast` component (top-right floating banner,
+  Info/Warn/Error severity, auto-dismiss 5s, manual close-X) + `ToastStack`
+  + `Dialog` modal (semi-transparent backdrop, OK/Cancel, backdrop
+  click = cancel). Rust `ToastQueue::push(msg, severity)` + `DialogQueue::
+  confirm(title, body) -> oneshot::Receiver<bool>` (uses
+  `tokio::sync::oneshot`). Phase 7's deferred confirm-before-model-swap
+  finally wired: clicking Switch on Whisper model picker opens Dialog 'Đổi
+  mô hình sẽ ngắt phiên ghi âm hiện tại - tiếp tục?'. Phase 11's clipboard
+  copy now shows 'Đã sao chép tóm tắt' info toast. Error toasts wired for:
+  model download fail, model swap fail, summary fail (one-shot per
+  session-id), config save fail (recording / dictionary / sentry /
+  autosummary). All toast strings are static Vietnamese, capped 200 chars,
+  privacy-safe. 12 new tests.
+- **Phase 12 — Provider hot-swap** (`vong-app/src/pipeline.rs`). New
+  `PipelineHandle` owns the streaming task + cancel `Arc<AtomicBool>` +
+  shared `LiveConfigHandle` (preserved across swap - dictionary, language,
+  target_mode all survive). `swap_provider(new_mode, dialog, toast)` flow:
+  if `new_mode == current_mode` → no-op; if recording → Dialog 'Đổi engine
+  STT sẽ ngắt phiên ghi âm hiện tại - tiếp tục?'; if idle → skip dialog;
+  on confirm → cancel old task with 5s timeout → spawn new provider task
+  with same channels → persist `provider.txt` → toast success. Rollback on
+  persist failure. `HotswapError { Cancelled, JoinTimeout, SpawnFailed,
+  PersistFailed }` each maps to Vietnamese toast. Restart banner removed
+  from `ProviderCard`. 6 new tests.
 
 ### Changed
 
@@ -138,6 +178,18 @@ LLM session summaries (OpenAI gpt-4o-mini).
   0.102.8` CVEs (RUSTSEC-2026-0049/0098/0099/0104) - transitive via
   `sentry 0.34 -> rustls 0.22.4`. Low risk: outbound Sentry transport only,
   not user data path. Remove when `sentry-rust` bumps the rustls-webpki dep.
+- **`current-view` routing**: added `"session-detail"` route to the
+  existing main / settings / wizard set.
+- **`vong-app/src/main.rs`**: streaming task lifecycle now owned by
+  `PipelineHandle`. `init_audio` constructs the handle, callbacks call
+  `pipeline.swap_provider()` instead of writing config + showing restart
+  banner. 5 dead pipeline-spawn functions removed (`spawn_whisper_pipeline`,
+  `spawn_soniox_pipeline`, `spawn_openai_pipeline`, `spawn_utterance_counter`,
+  `spawn_provider_task`).
+- **`vong-app/src/main.rs`**: 4 dead history-format functions removed after
+  HistoryCard switched from text concatenation to VecModel rows.
+- **`vong-app/Cargo.toml`**: added `arboard = "3"` for cross-platform
+  clipboard (Copy summary in SessionDetail).
 
 ### Fixed
 

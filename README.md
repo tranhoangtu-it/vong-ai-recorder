@@ -23,6 +23,9 @@ Desktop transcription app cho Windows 10/11 với real-time Vietnamese-first tra
 - 📚 **Dictionary** — tới 100 từ vựng riêng (tên người, thuật ngữ chuyên ngành) inject vào Whisper `initial_prompt` / Soniox `context` / OpenAI Realtime `instructions`
 - 🛡 **Crash reporting opt-in (Sentry)** — gửi crash report ẩn danh, mặc định TẮT, scrubber bóc transcript/audio/API key/file path khỏi events
 - ✨ **AI session summaries** — sau khi dừng ghi, OpenAI `gpt-4o-mini` tóm tắt tiếng Việt 3-5 câu (~$0.0006/phiên 30 phút)
+- 📜 **Session detail view** — click vào history row → mở SessionDetail với card tóm tắt + Regenerate / Copy + danh sách transcript segments
+- 🔔 **Toast + Dialog** — UI feedback nhất quán (info/warn/error), modal confirm trước các thao tác phá hoại (đổi mô hình, đổi provider)
+- 🔄 **Provider hot-swap** — đổi engine STT trong Settings → System không cần restart, dictionary + ngôn ngữ giữ nguyên
 - 📜 **Log rotation** — daily rolling file ở `%APPDATA%\Vong\Vong AI Recorder\data\logs\`
 
 ## Quick Start (Dev)
@@ -158,6 +161,9 @@ vong-ui/       Reusable Slint components (Phase 5-future — currently inlined i
 | 11 | ✅ Wired | Dictionary (custom vocabulary, <=100 entries, 3-provider injection) |
 | 12 | ✅ Wired | Crash reporting opt-in (Sentry, default OFF, scrubbed) |
 | 13 | ✅ Wired | AI session summaries (OpenAI gpt-4o-mini, end-of-session) |
+| 14 | ✅ Wired | HistoryCard VecModel + SessionDetail view + Summary preview wiring |
+| 15 | ✅ Wired | Toast + Dialog Slint infrastructure + model-switch confirm |
+| 16 | ✅ Wired | Provider hot-swap (no restart, LiveSttConfig preserved) |
 | 2-macOS | ⏸ Paused | screencapturekit + clock drift — deferred until Windows ships |
 
 **Wiring status**: All 7 wired phases functional via `vong-app/src/main.rs` pipeline.

@@ -100,7 +100,7 @@ jobs:
           Write-Output "msi_name=$dstName" >> $env:GITHUB_OUTPUT
 
       - name: Upload CPU MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vong-msi-cpu
           path: target/wix/Vong-AI-Recorder-*-x86_64.msi
@@ -188,7 +188,7 @@ jobs:
           Write-Output "msi_name=$dstName" >> $env:GITHUB_OUTPUT
 
       - name: Upload Vulkan MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vong-msi-vulkan
           path: target/wix/Vong-AI-Recorder-*-vulkan-x86_64.msi
